@@ -151,7 +151,12 @@ test("keeps local learning-material reading, direct Codex calls, scrolling, zoom
   assert.match(page, /deleteStoredPaper/);
   assert.match(page, /comment-anchor-mark/);
   assert.match(page, /comment-pin/);
-  assert.match(page, /新建批注/);
+  assert.match(page, /评论这一段/);
+  assert.match(page, /comment-target-layer/);
+  assert.match(page, /existingComment = comments\.find\(\(comment\) => comment\.segmentId === segment\.id\)/);
+  assert.match(page, /primarySegmentId: segment\.id/);
+  assert.match(page, /segments\.filter\(isCommentableSegment\)\.map/);
+  assert.match(page, /aria-label="按段落评论"/);
   assert.match(page, /删除《\$\{paper\.displayName\}》/);
   assert.match(page, /AI Chat/);
   assert.match(page, /startChatResize/);
@@ -270,6 +275,8 @@ test("keeps local learning-material reading, direct Codex calls, scrolling, zoom
   assert.match(styles, /\.figure-region-target/);
   assert.match(styles, /\.comment-anchor-mark/);
   assert.match(styles, /\.comment-editor/);
+  assert.match(styles, /\.comment-target-layer/);
+  assert.match(styles, /\.comment-target:hover/);
   assert.match(styles, /\.paper-delete-button/);
   assert.match(styles, /\.chat-attachments/);
   assert.match(styles, /\.chat-height-resizer/);

@@ -138,6 +138,7 @@ type SyncRect = { x: number; y: number; width: number; height: number };
 type PaperComment = {
   id: string;
   pageNumber: number;
+  segmentId?: string;
   selectedText: string;
   rects: SyncRect[];
   anchorX: number;
@@ -150,6 +151,7 @@ type CommentEditorState = {
   mode: "create" | "edit";
   commentId?: string;
   pageNumber: number;
+  segmentId?: string;
   selectedText: string;
   rects: SyncRect[];
   anchorX: number;
@@ -655,6 +657,21 @@ function SegmentOverlay({ segment, label, tone }: { segment: PageSegment; label:
   );
 }
 
+function segmentBounds(segment: PageSegment): SyncRect | null {
+  if (!segment.rects.length) return null;
+  const left = Math.min(...segment.rects.map((rect) => rect.x));
+  const top = Math.min(...segment.rects.map((rect) => rect.y));
+  const right = Math.max(...segment.rects.map((rect) => rect.x + rect.width));
+  const bottom = Math.max(...segment.rects.map((rect) => rect.y + rect.height));
+  return { x: left, y: top, width: right - left, height: bottom - top };
+}
+
+function isCommentableSegment(segment: PageSegment) {
+  const text = segment.text.replace(/\s+/g, " ").trim();
+  if (text.length >= 24) return true;
+  return segment.kind === "heading" && text.length >= 4 && /[A-Za-z\u4e00-\u9fff]{3}/.test(text);
+}
+
 function repositoryName(url: string) {
   return url.replace(/^https?:\/\/(?:www\.)?github\.com\//i, "").replace(/\/$/, "");
 }
@@ -1112,6 +1129,44 @@ function PdfPageView({
             onMouseLeave={onSourceLeave}
             onClick={(event) => onSourceClick(pageNumber, event)}
           />
+          {annotationMode === "comment" && (
+            <div className="comment-target-layer" aria-label={`第 ${pageNumber} 页可评论段落`}>
+              {segments.filter(isCommentableSegment).map((segment) => {
+                const bounds = segmentBounds(segment);
+                if (!bounds) return null;
+                const existingComment = comments.find((comment) => comment.segmentId === segment.id);
+                return (
+                  <button
+                    key={segment.id}
+                    type="button"
+                    className={`comment-target ${existingComment ? "has-comment" : ""}`}
+                    style={{ left: `${bounds.x * 100}%`, top: `${bounds.y * 100}%`, width: `${bounds.width * 100}%`, height: `${bounds.height * 100}%` }}
+                    aria-label={existingComment ? `编辑这一段的评论：${existingComment.content}` : `评论这一段：${segment.text.slice(0, 80)}`}
+                    title={existingComment ? "点击编辑这一段的评论" : "点击评论这一段"}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      if (existingComment) {
+                        onEditComment(existingComment);
+                        return;
+                      }
+                      const rects = mergeAdjacentTextRects(segment.rects);
+                      onStartComment({
+                        pageNumber,
+                        text: segment.text.slice(0, 6_000),
+                        rects: rects.map((rect) => ({ ...rect, text: segment.text })),
+                        x: 0,
+                        y: 0,
+                        segmentIds: [segment.id],
+                        primarySegmentId: segment.id,
+                      });
+                    }}
+                  >
+                    <span>{existingComment ? "编辑评论" : "点击评论"}</span>
+                  </button>
+                );
+              })}
+            </div>
+          )}
           <div className="figure-region-layer" aria-label={`第 ${pageNumber} 页资料图片区域`}>
             {figures.map((figure) => (
               <button
@@ -1145,12 +1200,12 @@ function PdfPageView({
             <section
               className="comment-editor"
               style={{ left: editorLeft, top: editorTop }}
-              aria-label={commentEditor.mode === "create" ? "新建批注" : "编辑批注"}
+              aria-label={commentEditor.mode === "create" ? "评论这一段" : "编辑评论"}
               onMouseDown={(event) => event.stopPropagation()}
               onMouseUp={(event) => event.stopPropagation()}
             >
               <header>
-                <span><CommentOutlined /> {commentEditor.mode === "create" ? "新建批注" : "编辑批注"}</span>
+                <span><CommentOutlined /> {commentEditor.mode === "create" ? "评论这一段" : "编辑评论"}</span>
                 <button type="button" title="关闭" onClick={onCancelComment}><CloseOutlined /></button>
               </header>
               <blockquote title={commentEditor.selectedText}>{commentEditor.selectedText}</blockquote>
@@ -2040,15 +2095,17 @@ export default function Home() {
   }, []);
 
   const startComment = useCallback((selection: PendingSelection) => {
-    const anchor = selection.rects.at(-1);
-    if (!anchor) return;
+    if (!selection.rects.length) return;
+    const top = Math.min(...selection.rects.map((rect) => rect.y));
+    const right = Math.max(...selection.rects.map((rect) => rect.x + rect.width));
     setCommentEditor({
       mode: "create",
       pageNumber: selection.pageNumber,
+      segmentId: selection.primarySegmentId,
       selectedText: selection.text,
       rects: selection.rects.map(({ x, y, width, height }) => ({ x, y, width, height })),
-      anchorX: Math.min(.97, Math.max(.03, anchor.x + anchor.width + .012)),
-      anchorY: Math.min(.96, Math.max(.025, anchor.y)),
+      anchorX: Math.min(.96, Math.max(.03, right + .012)),
+      anchorY: Math.min(.96, Math.max(.025, top)),
       content: "",
     });
     setPendingSelection(null);
@@ -2063,6 +2120,7 @@ export default function Home() {
       mode: "edit",
       commentId: comment.id,
       pageNumber: comment.pageNumber,
+      segmentId: comment.segmentId,
       selectedText: comment.selectedText,
       rects: comment.rects,
       anchorX: comment.anchorX,
@@ -2105,6 +2163,7 @@ export default function Home() {
       : [...comments, {
           id: `${commentEditor.pageNumber}-${timestamp}-${Math.random().toString(36).slice(2, 8)}`,
           pageNumber: commentEditor.pageNumber,
+          segmentId: commentEditor.segmentId,
           selectedText: commentEditor.selectedText,
           rects: commentEditor.rects,
           anchorX: commentEditor.anchorX,
@@ -3228,7 +3287,7 @@ export default function Home() {
           <div className="annotation-tools" aria-label="资料标注工具">
             <button className={annotationMode === "select" ? "active" : ""} title="选择文字" onClick={() => setAnnotationMode("select")}><SelectOutlined /></button>
             <button className={annotationMode === "highlight" ? "active" : ""} title="马克笔" onClick={() => setAnnotationMode("highlight")}><HighlightOutlined /></button>
-            <button className={annotationMode === "comment" ? "active" : ""} title={`批注${comments.length ? `（${comments.length}）` : ""}`} onClick={() => setAnnotationMode("comment")}><CommentOutlined /></button>
+            <button className={annotationMode === "comment" ? "active" : ""} title={`按段落评论${comments.length ? `（${comments.length}）` : ""}`} aria-label="按段落评论" onClick={() => setAnnotationMode("comment")}><CommentOutlined /></button>
             <button className={annotationMode === "erase" ? "active" : ""} title="橡皮擦：按住拖动，局部擦除标亮" aria-label="橡皮擦" aria-pressed={annotationMode === "erase"} onClick={() => setAnnotationMode("erase")}><span className="eraser-tool-icon" aria-hidden="true"><i /></span></button>
             <button className={chatOpen ? "active" : ""} title="AI Chat" onClick={() => setChatOpen((value) => !value)}><MessageOutlined /></button>
           </div>
