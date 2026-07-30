@@ -13,12 +13,13 @@ export async function generateMetadata(): Promise<Metadata> {
   const host = requestHeaders.get("x-forwarded-host") || requestHeaders.get("host") || "localhost:3000";
   const protocol = requestHeaders.get("x-forwarded-proto") || (host.startsWith("localhost") ? "http" : "https");
   const imageUrl = `${protocol}://${host}/og.png`;
-  const title = "PaperLens 论文镜 · 双栏论文翻译阅读器";
-  const description = "导入本地 PDF，保留正在阅读的英文栏，在另一栏查看对应中文翻译。";
+  const title = "PaperLens · 学习资料阅读与理解工作台";
+  const description = "面向论文、课程 PPT、讲义和阅读材料的本地优先工作台：保留原文排版，同步翻译、提问与笔记。";
   return {
     title,
     description,
-    openGraph: { title, description, images: [{ url: imageUrl, width: 1760, height: 992, alt: "PaperLens 论文镜双栏翻译阅读器" }] },
+    icons: { icon: "/favicon.svg" },
+    openGraph: { title, description, images: [{ url: imageUrl, width: 1760, height: 992, alt: "PaperLens 学习资料阅读与理解工作台" }] },
     twitter: { card: "summary_large_image", title, description, images: [imageUrl] },
   };
 }

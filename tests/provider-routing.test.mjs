@@ -15,7 +15,7 @@ test("falls back to local Codex when an API question requires repository evidenc
   assert.equal(requiresRepositoryVerification(payload), true);
   const route = resolveProviderRoute(payload, "mimo", { "local-codex": true, mimo: true });
   assert.equal(route.provider, "local-codex");
-  assert.match(route.fallbackReason, /核实论文仓库/);
+  assert.match(route.fallbackReason, /核实资料对应仓库/);
 });
 
 test("reports a capability error when repository verification has no local provider", () => {
@@ -23,4 +23,3 @@ test("reports a capability error when repository verification has no local provi
   assert.equal(route.provider, "openai");
   assert.match(route.unsupportedReason, /本机 Codex 当前不可用/);
 });
-

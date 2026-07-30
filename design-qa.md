@@ -1,5 +1,30 @@
 # PaperLens Design QA
 
+## 产品定位扩展：从论文阅读器到学习资料工作台 — 2026-07-30
+
+- 产品主定位更新为“本地优先的学习资料阅读与理解工作台”，覆盖论文、课程 PPT、讲义和阅读材料。
+- 现有 PDF、Word、PPT/PPTX 导入与本机转换能力保持不变；首页、空状态、阅读器、AI Chat、移动端标签和网页元信息统一改用“资料/文档”语言。
+- 翻译、术语和问答提示词不再假定输入一定是英文学术论文，同时继续保留公式、引用、专业术语和证据页码要求。
+- GitHub/alphaXiv 仓库核实仍作为论文或课程代码材料的增强能力，不再代表整个产品只服务论文。
+- 桌面第一屏和 390 × 844 移动端均显示新定位；移动端实测 `scrollWidth = 390`，无水平溢出。
+- 新的 `public/og.png` 直接使用 1760 × 992 的真实产品界面，替换旧“论文镜 / 双栏论文”宣传图。
+- 验证证据：`output/playwright/learning-materials-positioning-desktop.png`、`output/playwright/learning-materials-positioning-mobile.png`。
+- 浏览器控制台：0 errors，0 warnings；TypeScript、ESLint、production build 与 52 个 Node 回归测试全部通过。
+
+final result: passed
+
+## Cross-paper `@` mentions and paper aliases — 2026-07-30
+
+- Imported PDFs now prefer a meaningful metadata title or the visually prominent first-page title instead of exposing a numeric or arbitrary filename as the paper identity. Placeholder metadata such as `(anonymous)` is rejected.
+- Each stored paper keeps one stable ID plus searchable aliases from its formal title, original filename, prior aliases, and detected GitHub repository name.
+- Live validation upgraded `LingBot_VA2_paper.pdf` to `Native Video-Action Pretraining for Generalizable Robot Control`; typing `@Ling` returned that formal title with `也可通过 LingBot_VA2_paper 找到`.
+- The mention menu supports keyboard navigation, Enter/Tab selection, Escape dismissal, mouse selection, removable chips, duplicate exclusion, and a three-paper limit.
+- Sending a live cross-paper question parsed the referenced 29-page PDF locally, displayed the formal-title evidence chip, and entered the relevant-page retrieval state without browser console errors. The request was then intentionally stopped before waiting for a model answer.
+- Referenced papers contribute at most three question-ranked pages each. The bridge instructs the model to cite paper names and page numbers, separate evidence across papers, and state when the retrieved pages are insufficient.
+- Verification: 36 Node tests, TypeScript typecheck, production build, and live in-app browser interaction all passed.
+
+final result: passed
+
 ## Dynamic GitHub repository routing — 2026-07-30
 
 - PaperLens now scans the first four PDF pages independently of the restored reading position, covering repository links printed after the abstract.
@@ -83,7 +108,7 @@ The thumbnail rail and right panel are removed at the mobile breakpoint. A persi
 
 - A real five-page local PDF loaded and all page thumbnails rendered.
 - PDF canvas and selectable text layer were measured after the fix: 887.4 × 1148.4 px and 887.0 × 1147.9 px respectively.
-- Text selection, selection-to-chat context, yellow highlight rectangles, group erasure, and page-scoped storage are wired through the rendered text layer. The in-app browser automation does not retain native document selection after synthetic drag, so selection geometry and event handling were additionally verified from the live DOM and source contract.
+- Text selection, selection-to-chat context, yellow highlight rectangles, drag-to-erase partial geometry, and page-scoped storage are wired through the rendered text layer. The eraser owns an interaction layer above the transparent PDF text spans, so pointer and pen strokes cut only the touched highlight area while leaving neighboring marks intact.
 - The abstract's GitHub URL was detected as `openai/openai-agents-python`; repository verification mode toggled on and off and changed the chat prompt.
 - A real browser-originated request reached the local Codex bridge and returned: “闭环控制的核心作用是通过持续观察并验证动作是否真正成功，在失败或停滞时及时恢复，避免智能体盲目执行。”
 - The Codex connection dialog confirmed current ChatGPT login/config usage, loopback-only bridge access, and read-only sandboxing.
@@ -175,10 +200,18 @@ The Vinext build emits a non-blocking optimize-imports warning for the Ant Desig
 ## Text and figure overlay boundary correction — 2026-07-30
 
 - RoboTTT page 9 was replayed against the real PDF coordinates. “As shown in Table 2…” and the adjacent “Task Completion Score” table header now produce separate visual runs instead of one cross-column rectangle.
-- Translation synchronization uses per-line overlays with small padding. Only the first line owns the “对应译文” or context label; labels near the page top move below the line instead of being clipped.
+
+- Translation synchronization uses one lightly tinted bounding box per paragraph. The paragraph remains separated from neighboring columns and labels near the page top move below the box instead of being clipped.
 - RoboTTT page 11 Figure 12 was replayed against the real PDF. The detected image frame ends at normalized y `0.2536`; its caption starts at `0.2596`, so the caption and following prose are outside the interactive crop.
 - Figure styling uses a one-pixel border and lighter tint. Its hover label separates figure identity from the “加入 AI Chat” action and moves inside only when there is no safe space above.
 - Focused lint passed. All 21 Node regressions passed, and the production build completed successfully.
+
+## Full-paper translation queue — 2026-07-30
+
+- Added a separate “翻译全文” action while preserving “翻译本页”.
+- The queue starts with the current page, continues forward, then fills earlier pages; already translated pages are skipped.
+- Each completed page is written back to the paper record in IndexedDB so a stopped or reopened task resumes from remaining pages.
+- Progress reports completed/total pages, current page, provider usage, paused state, and failed pages. Two consecutive failures stop the queue instead of repeatedly calling a broken Provider.
 
 ## Continuous document scrolling — 2026-07-30
 
@@ -187,3 +220,43 @@ The Vinext build emits a non-blocking optimize-imports warning for the Ant Desig
 - The page nearest the viewport center becomes active, keeping the toolbar page number, thumbnail selection, translation, notes, and chat context synchronized while the document moves.
 - Thumbnail, toolbar, and translation-panel navigation scroll to the selected page. Nearby jumps animate unless the operating system requests reduced motion; distant jumps are immediate.
 - Focused geometry regressions cover active-page selection, empty-frame fallback, and the two-page render overscan. TypeScript, all 21 Node regressions, and the production build pass.
+
+## Last-read restoration and resizable panels — 2026-07-30
+
+- Active-page changes synchronously update a local progress mirror and asynchronously persist the page, timestamp, and matching page thumbnail in IndexedDB. Refreshing or closing the reader no longer depends on using the in-app back button first.
+- “我的空间” shows the actual last-read page preview and an explicit `第 N 页 / 共 M 页` badge. Opening a stored paper restores that page and scrolls the continuous document directly to it.
+- Both desktop dividers are pointer-draggable and keyboard accessible. Width constraints preserve usable left, center, and right panels; the chosen layout persists across refreshes. Mobile keeps the existing paper/translation switch without desktop resize handles.
+- Real browser regression used a 9-page PDF: page 8 remained visible in the card and reopened at page 8. Dragging the left divider left by 40 px grew the center from 622 px to 662 px; dragging the right divider right by 60 px grew it to 722 px. Refresh restored left/center/right widths of 104/722/360 px.
+- TypeScript, lint, the production build, and all 36 Node regressions pass.
+
+## Marker drag preview alignment — 2026-07-30
+
+- Marker mode no longer activates source-to-translation paragraph hover overlays while the user is dragging across PDF text.
+- Native selection preview uses the same translucent yellow as the committed marker rectangles; the purple paragraph box and `选区上下文` label remain exclusive to selection mode.
+- Committing a marker stroke no longer changes AI Chat's selected-text context. Choosing `标亮` from an explicit text selection still preserves that selection context.
+- Real browser regression on `mobile-aloha.pdf` dragged across eight abstract lines. Preview and committed highlight top/bottom coordinates matched with `0 px` delta, no segment box was visible during the drag, and no selection-context overlay remained after mouseup.
+- Visual evidence: `output/playwright/marker-preview.png` and `output/playwright/marker-final.png`.
+
+## Paper-specific dynamic terminology — 2026-07-30
+
+- Removed the four hard-coded demo terms. Opening the terminology tab now asks the selected AI provider for 6–10 technical terms that actually appear on the active PDF page and renders the returned English/Chinese pairs.
+- Term responses use a strict JSON contract, reject empty output, normalize whitespace, deduplicate English terms case-insensitively, and cap the rendered list at 12 entries.
+- Results are cached per paper and page in IndexedDB. Reopening a paper or returning to a previously processed page restores its terms without another provider request; “重新提取” explicitly refreshes them.
+- Real browser regression used `17135_Drifting_Policies_for_Vi.pdf`. Page 1 returned terms including `flow matching`, `diffusion heads`, and `rule-based verifier`; page 2 returned a different list including `Unrolled denoising MDP`, `PPO over denoising steps`, and `filtered behavior cloning`.
+- Returning from page 2 to page 1 restored the original page-1 list immediately. The browser request log remained at two successful `/api/codex/invoke` requests, proving the return used the page cache.
+- TypeScript, lint, the production build, and all 39 Node regressions pass.
+
+## Resizable AI Chat drawer — 2026-07-30
+
+- The horizontal rule above AI Chat is now a pointer-draggable, keyboard-accessible separator. Dragging upward enlarges the drawer; dragging downward returns space to the paper.
+- The drawer clamps between a usable chat minimum and a viewport-dependent maximum that preserves at least 260 px for the paper reader. Arrow Up/Down adjusts it in 16 px steps, and double-click restores the 292 px default.
+- The chosen height is stored with the existing reader layout and restored after refresh. Image and paper-context attachments now consume the flexible drawer body instead of switching among four hard-coded heights.
+- Real browser regression at a 934 px document height dragged the divider upward by 120 px: AI Chat grew from 292 px to 412 px while the PDF stage changed from 542 px to 422 px. After refresh and reopening the stored paper, AI Chat returned at exactly 412 px.
+
+## Marker line locking and full-width drag — 2026-07-30
+
+- Marker strokes now use pointer capture and an explicit PDF text-layer range instead of depending on the browser's native drag selection lifecycle.
+- Dragging into the blank area to the right of a text line resolves to that line's final text fragment, so the committed highlight reaches the actual line ending.
+- Small vertical drift remains locked to the starting line; moving beyond the line-lock threshold still produces an intentional multi-line highlight.
+- Real browser regression on LingBot-VA 2.0 page 2 dragged from x `300` to blank-space x `820` with a 6 px downward drift. It committed one row ending at the text line's measured right edge (`715.27 px`). A fragmented line ended at its final fragment (`749.14 px`), and a deliberate 37 px vertical drag continued to select four rows.
+- The production build and all 52 Node regressions pass.

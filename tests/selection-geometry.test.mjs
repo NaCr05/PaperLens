@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { mergeSelectionRects } from "../app/selection-geometry.ts";
+import { mergeSelectionRects, normalizeSelectionRect, shouldLockMarkerToLine } from "../app/selection-geometry.ts";
 
 test("merges adjacent PDF text fragments on the same visual line", () => {
   const merged = mergeSelectionRects([
@@ -25,4 +25,19 @@ test("keeps distant fragments and neighboring lines separate", () => {
   ]);
 
   assert.equal(merged.length, 3);
+});
+
+test("keeps a slightly wandering marker stroke on its starting line", () => {
+  assert.equal(shouldLockMarkerToLine(120, 137, 18), true);
+  assert.equal(shouldLockMarkerToLine(120, 146, 18), false);
+});
+
+test("clips selection geometry to the visible PDF frame", () => {
+  const normalized = normalizeSelectionRect(
+    { left: 80, top: 90, right: 460, bottom: 130 },
+    { left: 100, top: 100, width: 300, height: 500 },
+    "line",
+  );
+
+  assert.deepEqual(normalized, { x: 0, y: 0, width: 1, height: .06, text: "line" });
 });

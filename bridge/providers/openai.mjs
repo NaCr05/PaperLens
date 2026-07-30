@@ -25,6 +25,26 @@ const TRANSLATION_SCHEMA = {
   required: ["segments"],
 };
 
+const TERMS_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    terms: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          term: { type: "string" },
+          translation: { type: "string" },
+        },
+        required: ["term", "translation"],
+      },
+    },
+  },
+  required: ["terms"],
+};
+
 function normalizeImages(images) {
   if (!Array.isArray(images)) return [];
   let totalBytes = 0;
@@ -85,7 +105,7 @@ export function createOpenAIProvider({
   }
 
   async function invoke(payload, { prompt, signal, model, effort } = {}) {
-    const selectedModel = model || (payload.mode === "translate" ? translationModel : chatModel);
+    const selectedModel = model || (payload.mode === "translate" || payload.mode === "terms" ? translationModel : chatModel);
     const selectedEffort = OPENAI_REASONING_EFFORTS.includes(effort) ? effort : reasoningEffort;
     const content = [{ type: "input_text", text: prompt }];
     for (const imageUrl of normalizeImages(payload.images)) {
@@ -97,6 +117,8 @@ export function createOpenAIProvider({
       reasoning: { effort: selectedEffort },
       ...(payload.mode === "translate" ? {
         text: { format: { type: "json_schema", name: "paperlens_translation", strict: true, schema: TRANSLATION_SCHEMA } },
+      } : payload.mode === "terms" ? {
+        text: { format: { type: "json_schema", name: "paperlens_terms", strict: true, schema: TERMS_SCHEMA } },
       } : {}),
     };
 
@@ -144,4 +166,3 @@ export function createOpenAIProvider({
     testConnection,
   };
 }
-

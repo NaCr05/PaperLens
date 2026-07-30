@@ -9,6 +9,7 @@ import { ProviderError, normalizeProviderError } from "./provider-errors.mjs";
 import { INVOCATION_MODES, PROVIDER_IDS, resolveProviderRoute } from "./provider-routing.mjs";
 import { createMiMoProvider } from "./providers/mimo.mjs";
 import { createOpenAIProvider } from "./providers/openai.mjs";
+import { createDocumentConverter, DocumentConversionError } from "./document-converter.mjs";
 
 const HOST = "127.0.0.1";
 const PORT = Number(process.env.PAPERLENS_CODEX_PORT || 43123);
@@ -29,6 +30,7 @@ const ALLOWED_ORIGINS = new Set([
 let codexPath = "codex";
 let codexAvailable = false;
 const activeProviders = new Set();
+let documentConversionActive = false;
 let skillAvailable = false;
 
 for (const candidate of CODEX_CANDIDATES) {
@@ -44,6 +46,7 @@ for (const candidate of CODEX_CANDIDATES) {
 
 const openAIProvider = createOpenAIProvider();
 const mimoProvider = createMiMoProvider();
+const documentConverter = await createDocumentConverter();
 
 try {
   await access(PAPER_READER_SKILL);
@@ -56,12 +59,46 @@ function corsHeaders(origin) {
   const allowedOrigin = ALLOWED_ORIGINS.has(origin) ? origin : "http://localhost:3000";
   return {
     "access-control-allow-origin": allowedOrigin,
-    "access-control-allow-headers": "content-type",
+    "access-control-allow-headers": "content-type,x-paperlens-file-name",
     "access-control-allow-methods": "GET,POST,OPTIONS",
+    "access-control-expose-headers": "content-disposition,x-paperlens-converter",
     "cache-control": "no-store",
     "content-type": "application/json; charset=utf-8",
     vary: "Origin",
   };
+}
+
+async function readBytes(request, limit = 80 * 1024 * 1024) {
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of request) {
+    size += chunk.length;
+    if (size > limit) {
+      throw new DocumentConversionError("文件超过 80 MB，请先精简文档再导入", { code: "document_too_large", status: 413 });
+    }
+    chunks.push(chunk);
+  }
+  if (!size) throw new DocumentConversionError("文件内容为空", { code: "empty_document", status: 400 });
+  return Buffer.concat(chunks);
+}
+
+function decodeFileName(value) {
+  if (typeof value !== "string" || !value) return "";
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+function sendPdf(response, result, origin) {
+  response.writeHead(200, {
+    ...corsHeaders(origin),
+    "content-type": "application/pdf",
+    "content-disposition": `inline; filename*=UTF-8''${encodeURIComponent(result.fileName)}`,
+    "x-paperlens-converter": result.engine,
+  });
+  response.end(result.pdf);
 }
 
 function sendJson(response, status, body, origin) {
@@ -88,8 +125,24 @@ function imageMetadata(payload) {
   return Array.isArray(payload.images)
     ? payload.images.slice(0, 4).map((image, index) => ({
         label: compact(image?.label, 160) || `图片 ${index + 1}`,
-        source: image?.source === "paper" ? "论文页面截图" : "用户粘贴图片",
+        source: image?.source === "paper" ? "资料页面截图" : "用户粘贴图片",
         pageNumber: Number.isInteger(image?.pageNumber) ? image.pageNumber : null,
+      }))
+    : [];
+}
+
+function referencedPaperContext(payload) {
+  return Array.isArray(payload.referencedPapers)
+    ? payload.referencedPapers.slice(0, 5).map((paper) => ({
+        title: compact(paper?.title, 300) || "未命名资料",
+        fileName: compact(paper?.fileName, 300),
+        aliases: Array.isArray(paper?.aliases) ? paper.aliases.slice(0, 8).map((alias) => compact(alias, 160)).filter(Boolean) : [],
+        folderNames: Array.isArray(paper?.folderNames) ? paper.folderNames.slice(0, 3).map((name) => compact(name, 100)).filter(Boolean) : [],
+        repositoryUrl: compact(paper?.repositoryUrl, 500),
+        pages: Array.isArray(paper?.pages) ? paper.pages.slice(0, 3).map((page) => ({
+          pageNumber: Number.isInteger(page?.pageNumber) ? page.pageNumber : null,
+          text: compact(page?.text, 7_000),
+        })).filter((page) => page.pageNumber && page.text) : [],
       }))
     : [];
 }
@@ -129,6 +182,13 @@ function buildPrompt(payload) {
   const paperTitle = compact(payload.paperTitle, 300);
   const repositoryUrl = compact(payload.repositoryUrl, 500);
   const attachedImages = imageMetadata(payload);
+  const referencedPapers = referencedPaperContext(payload);
+  const referencedFolders = Array.isArray(payload.referencedFolders)
+    ? payload.referencedFolders.slice(0, 3).map((folder) => ({
+        name: compact(folder?.name, 100) || "未命名文件夹",
+        paperCount: Number.isInteger(folder?.paperCount) ? folder.paperCount : 0,
+      }))
+    : [];
   const translationSegments = Array.isArray(payload.segments)
     ? payload.segments.slice(0, 120).map((segment) => ({
         id: compact(segment?.id, 80),
@@ -141,11 +201,13 @@ function buildPrompt(payload) {
     : "";
 
   if (mode === "translate") {
-    if (!pageText) throw new Error("当前页没有可翻译文字");
-    const segments = translationSegments.length ? translationSegments : [{ id: "p1-s1", kind: "paragraph", text: pageText }];
+    const visualPage = payload.visualPage === true && attachedImages.length > 0;
+    if (!pageText && !visualPage) throw new Error("当前页没有可翻译文字");
+    const pageNumber = Number.isInteger(payload.pageNumber) ? payload.pageNumber : 1;
+    const segments = translationSegments.length ? translationSegments : [{ id: `p${pageNumber}-s1`, kind: "paragraph", text: pageText }];
     return [
       "Use $paper-reader in translation mode.",
-      "你是 PaperLens 中的论文翻译助手。把下面的英文学术论文内容翻译成自然、准确、易读的简体中文。",
+      "你是 PaperLens 中的学习资料翻译助手。把下面的英文资料（可能是论文、课程 PPT、讲义或阅读材料）翻译成自然、准确、易读的简体中文。",
       "严格要求：保留章节层级、公式、变量、引用编号和专业术语；不要总结；不要补充原文没有的信息。",
       "公式规则：所有可可靠还原的数学公式必须转写为有效 LaTeX；行内公式使用 \\( ... \\)，独立公式使用 \\[ ... \\]。不要在公式分隔符外裸露下划线、花括号或 \\prod、\\sum 等命令。公式内容本身不要翻译或改写。",
       "PDF 可能把同一公式的主体、乘积/求和符号、上下限和编号拆到多个输入 segment。只要当前 segment 不是一条完整、可独立核对的公式，或公式的任何关键部分位于相邻 segment，就必须使用 [[SOURCE_FORMULA]]；禁止输出缺少乘积号、上下限、条件项或等号一侧的半条 LaTeX 公式。",
@@ -153,38 +215,62 @@ function buildPrompt(payload) {
       "读者明确希望理解公式：只要本段包含公式，就在 formulaExplanation 中用 1–3 句简体中文解释公式表达的关系、主要变量和上下标/求和范围；只依据当前页上下文，不确定的符号要明确说上下文未定义。没有公式时 formulaExplanation 必须是空字符串。",
       "JSON 转义要求：LaTeX 的每个反斜杠在 JSON 字符串中必须写成双反斜杠，例如 \\\\prod、\\\\theta、\\\\[ 和 \\\\]；确保整个输出可被 JSON.parse 直接解析。",
       "为了让原文与译文双向同步，只输出严格 JSON，不要 Markdown 代码围栏，不要输出 JSON 以外的说明。结构必须是：{\"segments\":[{\"id\":\"原始 id\",\"translation\":\"对应中文译文（公式用 LaTeX 或 [[SOURCE_FORMULA]]）\",\"formulaExplanation\":\"公式解释；无公式时为空字符串\"}]}。每个输入 id 必须恰好出现一次、顺序不变，不得合并或拆分段落。",
-      `论文：${paperTitle || "本地论文"}`,
+      visualPage ? "当前页没有可提取文字层。必须实际查看随请求附带的整页图片，识别并翻译图片中全部清晰可见的英文内容；保留标题、表格行列关系、项目符号、数字和专有名词。看不清的文字标为［无法辨认］，禁止猜测。输入中 [[PAPERLENS_VISUAL_PAGE]] 只是视觉页占位符，不得翻译或出现在译文中。整页译文放入唯一输入 id 对应的 translation；用换行保持阅读顺序。" : "",
+      `资料：${paperTitle || "本地资料"}`,
+      visualPage ? `图片上下文：${attachedImages.map((image) => `${image.label}${image.pageNumber ? `（第 ${image.pageNumber} 页）` : ""}`).join("、")}` : "",
       "当前页分段原文：",
       JSON.stringify(segments),
+    ].filter(Boolean).join("\n\n");
+  }
+
+  if (mode === "terms") {
+    if (!pageText) throw new Error("当前页没有可整理的文字");
+    return [
+      "Use $paper-reader and preserve accurate academic terminology.",
+      "你是 PaperLens 的学习资料术语整理助手。只根据下面这一页实际出现的英文内容，提取 6–10 个对理解本页最重要的专业术语或短语，并给出准确、简洁的简体中文译名。",
+      "严格要求：term 必须是当前页原文中实际出现的英文形式；优先当前资料特有的方法名、课程概念、任务名、模型名和技术短语；不要输出 author、method、result、model、data 等过于泛化的单词；不要重复、改写或补充原文没有的术语。缩写可保留，并在中文译名中必要时说明全称。",
+      "只输出严格 JSON，不要 Markdown 代码围栏，不要输出 JSON 以外的说明。结构必须是：{\"terms\":[{\"term\":\"原文术语\",\"translation\":\"准确中文译名\"}]}。",
+      `资料：${paperTitle || "本地资料"}`,
+      "当前页原文：",
+      pageText,
     ].join("\n\n");
   }
 
   if (!question) throw new Error("请输入问题");
   const common = [
     "Use $paper-reader in explanation mode unless this is a repository implementation question.",
-    "你是运行在 PaperLens 论文阅读器里的本机 Codex。请用简体中文回答，先给直接结论，再解释依据。不要假装看过没有提供或没有查到的内容。",
+    "你是运行在 PaperLens 学习资料阅读工作台里的本机 Codex。请用简体中文回答，先给直接结论，再解释依据。不要假装看过没有提供或没有查到的内容。",
     "公式输出规则：回答中的每一个数学公式都必须写成有效 LaTeX；行内公式使用 \\( ... \\)，独立公式使用 \\[ ... \\]。不要在分隔符外裸露下划线、花括号或 \\prod、\\sum 等 LaTeX 命令，也不要把公式放进 Markdown 代码围栏。对公式的解释要说明它表达的关系、主要变量以及上下标或求和/乘积范围；当前上下文没有定义的符号要明确指出，禁止猜测。",
-    `论文：${paperTitle || "本地论文"}`,
+    `资料：${paperTitle || "本地资料"}`,
     pageText ? `当前页内容：\n${pageText}` : "",
     selectedText ? `读者选中的重点段落：\n${selectedText}` : "",
-    attachedImages.length ? `图片上下文：\n${attachedImages.map((image, index) => `${index + 1}. ${image.label}（${image.source}${image.pageNumber ? `，论文第 ${image.pageNumber} 页` : ""}）`).join("\n")}` : "",
+    attachedImages.length ? `图片上下文：\n${attachedImages.map((image, index) => `${index + 1}. ${image.label}（${image.source}${image.pageNumber ? `，资料第 ${image.pageNumber} 页` : ""}）`).join("\n")}` : "",
     attachedImages.length ? "请实际查看随请求附带的图片，并将图中的架构、模块、箭头、图例和文字与页面文本结合起来回答。明确区分图片中可见事实与自己的解释；看不清的部分直接说明，不得根据常识补画或猜测。" : "",
+    referencedFolders.length ? `读者通过 @ 引用的文件夹：${referencedFolders.map((folder) => `${folder.name}（${folder.paperCount} 份资料）`).join("、")}。后续列出的资料是系统根据当前问题从这些文件夹中动态检索出的最相关证据。` : "",
+    referencedPapers.length ? `读者通过 @ 从“我的空间”引用的其他资料：\n${referencedPapers.map((paper, index) => [
+      `${index + 1}. ${paper.title}`,
+      paper.folderNames.length ? `来源文件夹：${paper.folderNames.join("、")}` : "",
+      paper.aliases.length ? `别名：${paper.aliases.join("、")}` : "",
+      paper.repositoryUrl ? `仓库：${paper.repositoryUrl}` : "",
+      ...paper.pages.map((page) => `[${paper.title}，第 ${page.pageNumber} 页]\n${page.text}`),
+    ].filter(Boolean).join("\n")).join("\n\n")}` : "",
+    referencedPapers.length ? "回答涉及被引用资料时，必须明确写出资料名称和证据页码；比较多份资料时分别说明证据，不得把一份资料的内容归到另一份。若资料来自被 @ 的文件夹，说明当前回答实际采用了其中哪些资料。这里提供的是从所选资料或整个文件夹中按问题检索出的相关页面，不代表完整全文；证据不足时应明确说明。" : "",
     history ? `最近对话：\n${history}` : "",
   ].filter(Boolean);
 
   if (mode === "repository") {
     common.push(
       "Use $paper-reader in repository verification mode.",
-      `论文对应仓库：${repositoryUrl}`,
+      `当前资料对应仓库：${repositoryUrl}`,
       "这是一个代码实现问题。必须先通过 GitHub MCP、alphaXiv 的仓库读取工具或实时网页检索核实仓库内容，再回答。请引用准确的文件路径、类/函数/配置名和可访问链接；如果仓库无法访问或证据不足，明确说明，不得凭经验猜测。",
       "最终回答第一行必须是 [[REPOSITORY_USED]]，界面会隐藏这个标记。",
     );
   } else if (mode === "auto") {
     if (!repositoryUrl) throw new Error("自动仓库模式缺少仓库链接");
     common.push(
-      `论文已检测到对应仓库：${repositoryUrl}`,
-      "先根据读者问题动态判断是否需要读取仓库。一般的论文概念解释、摘要理解、方法直觉、术语和只依赖当前段落的问题，不要读取仓库，直接依据提供的论文上下文回答。",
-      "如果问题涉及代码实现、文件或目录、类/函数/接口、配置参数、训练或评估脚本、数据格式、命令行、复现步骤、部署行为，或要求核对论文与代码是否一致，必须切换到 $paper-reader repository verification mode，并先通过 GitHub MCP、alphaXiv 的仓库读取工具或实时网页检索核实真实仓库。引用准确的路径、符号和可访问链接；访问失败时明确说明，禁止猜测。",
+      `当前问题可按需核实的资料对应仓库：${[repositoryUrl, ...referencedPapers.map((paper) => paper.repositoryUrl)].filter(Boolean).join("、")}`,
+      "先根据读者问题动态判断是否需要读取仓库。一般的资料概念解释、摘要理解、课程内容、方法直觉、术语和只依赖当前段落的问题，不要读取仓库，直接依据提供的资料上下文回答。",
+      "如果问题涉及代码实现、文件或目录、类/函数/接口、配置参数、训练或评估脚本、数据格式、命令行、复现步骤、部署行为，或要求核对资料与代码是否一致，必须切换到 $paper-reader repository verification mode，并先通过 GitHub MCP、alphaXiv 的仓库读取工具或实时网页检索核实真实仓库。引用准确的路径、符号和可访问链接；访问失败时明确说明，禁止猜测。",
       "最终回答第一行必须二选一：实际读取并核实仓库时输出 [[REPOSITORY_USED]]；没有读取仓库时输出 [[REPOSITORY_SKIPPED]]。界面会隐藏这个标记并展示本次路由结果。",
     );
   }
@@ -322,8 +408,8 @@ function normalizeModel(value, fallback, allowedModels) {
 async function invokeProvider(providerId, payload, requestOptions) {
   if (providerId === "openai") {
     const model = normalizeModel(
-      payload.mode === "translate" ? requestOptions.translationModel : requestOptions.chatModel,
-      payload.mode === "translate" ? openAIProvider.models.translation : openAIProvider.models.chat,
+      payload.mode === "translate" || payload.mode === "terms" ? requestOptions.translationModel : requestOptions.chatModel,
+      payload.mode === "translate" || payload.mode === "terms" ? openAIProvider.models.translation : openAIProvider.models.chat,
       openAIProvider.allowedModels,
     );
     return openAIProvider.invoke(payload, {
@@ -335,8 +421,8 @@ async function invokeProvider(providerId, payload, requestOptions) {
   }
   if (providerId === "mimo") {
     const model = normalizeModel(
-      payload.mode === "translate" ? requestOptions.translationModel : requestOptions.chatModel,
-      payload.mode === "translate" ? mimoProvider.models.translation : mimoProvider.models.chat,
+      payload.mode === "translate" || payload.mode === "terms" ? requestOptions.translationModel : requestOptions.chatModel,
+      payload.mode === "translate" || payload.mode === "terms" ? mimoProvider.models.translation : mimoProvider.models.chat,
       mimoProvider.allowedModels,
     );
     return mimoProvider.invoke(payload, { prompt: buildPrompt(payload), signal: requestOptions.signal, model });
@@ -361,7 +447,33 @@ const server = createServer(async (request, response) => {
       service: "PaperLens AI bridge",
       defaultProvider: "local-codex",
       providers: providerHealth(),
+      documentConversion: {
+        available: documentConverter.available,
+        engine: documentConverter.engine,
+        formats: documentConverter.formats,
+      },
     }, origin);
+    return;
+  }
+  if (request.method === "POST" && request.url === "/convert-document") {
+    let acquiredConverter = false;
+    try {
+      if (documentConversionActive) {
+        throw new DocumentConversionError("正在转换上一个文档，请稍候再试", { code: "converter_busy", status: 429 });
+      }
+      documentConversionActive = true;
+      acquiredConverter = true;
+      const fileName = decodeFileName(request.headers["x-paperlens-file-name"]);
+      const bytes = await readBytes(request);
+      const result = await documentConverter.convert(bytes, fileName);
+      sendPdf(response, result, origin);
+    } catch (error) {
+      const status = error instanceof DocumentConversionError ? error.status : 500;
+      const code = error instanceof DocumentConversionError ? error.code : "conversion_failed";
+      sendJson(response, status, { error: error instanceof Error ? error.message : "文档转换失败", code }, origin);
+    } finally {
+      if (acquiredConverter) documentConversionActive = false;
+    }
     return;
   }
   if (request.method === "POST" && request.url === "/test-provider") {

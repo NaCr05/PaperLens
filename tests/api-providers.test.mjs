@@ -87,3 +87,40 @@ test("MiMo adapter uses Chat Completions JSON mode and base64 image content", as
   });
 });
 
+test("term extraction uses structured JSON output on both API providers", async () => {
+  let openAIRequest;
+  await withMockServer(async (request, response) => {
+    openAIRequest = await readBody(request);
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({
+      id: "resp_terms",
+      object: "response",
+      created_at: 1,
+      status: "completed",
+      model: "gpt-5.6-terra",
+      output: [{ id: "msg_terms", type: "message", status: "completed", role: "assistant", content: [{ type: "output_text", text: "{\"terms\":[{\"term\":\"flow matching\",\"translation\":\"流匹配\"}]}", annotations: [] }] }],
+    }));
+  }, async (baseURL) => {
+    const provider = createOpenAIProvider({ apiKey: "test-key", baseURL });
+    await provider.invoke({ mode: "terms" }, { prompt: "terms", model: "gpt-5.6-terra", effort: "low" });
+  });
+  assert.equal(openAIRequest.text.format.name, "paperlens_terms");
+  assert.deepEqual(openAIRequest.text.format.schema.required, ["terms"]);
+
+  let mimoRequest;
+  await withMockServer(async (request, response) => {
+    mimoRequest = await readBody(request);
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({
+      id: "chat_terms",
+      object: "chat.completion",
+      created: 1,
+      model: "mimo-v2.5",
+      choices: [{ index: 0, finish_reason: "stop", message: { role: "assistant", content: "{\"terms\":[]}" } }],
+    }));
+  }, async (baseURL) => {
+    const provider = createMiMoProvider({ apiKey: "test-key", baseURL });
+    await provider.invoke({ mode: "terms" }, { prompt: "terms", model: "mimo-v2.5" });
+  });
+  assert.equal(mimoRequest.response_format.type, "json_object");
+});

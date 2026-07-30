@@ -72,7 +72,7 @@ export function createMiMoProvider({
   }
 
   async function invoke(payload, { prompt, signal, model } = {}) {
-    const selectedModel = model || (payload.mode === "translate" ? translationModel : chatModel);
+    const selectedModel = model || (payload.mode === "translate" || payload.mode === "terms" ? translationModel : chatModel);
     const content = [{ type: "text", text: prompt }];
     for (const imageUrl of normalizeImages(payload.images)) content.unshift({ type: "image_url", image_url: { url: imageUrl } });
     const completion = await complete({
@@ -84,7 +84,7 @@ export function createMiMoProvider({
       max_completion_tokens: payload.mode === "translate" ? 16_384 : 8_192,
       temperature: 1,
       top_p: 0.95,
-      ...(payload.mode === "translate" ? { response_format: { type: "json_object" } } : {}),
+      ...(payload.mode === "translate" || payload.mode === "terms" ? { response_format: { type: "json_object" } } : {}),
     }, signal);
     const answer = completion.choices?.[0]?.message?.content?.trim();
     if (!answer) throw new ProviderError("MiMo API 没有返回文本内容", { code: "empty_response", status: 502, retryable: true, provider: "mimo" });

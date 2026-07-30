@@ -32,17 +32,18 @@ test("server-renders the PaperLens reader shell and metadata", async () => {
 
   const html = await response.text();
   assert.match(html, /<html lang="zh-CN">/i);
-  assert.match(html, /<title>PaperLens 论文镜 · 双栏论文翻译阅读器<\/title>/i);
-  assert.match(html, /导入本地 PDF，保留正在阅读的英文栏，在另一栏查看对应中文翻译。/);
+  assert.match(html, /<title>PaperLens · 学习资料阅读与理解工作台<\/title>/i);
+  assert.match(html, /面向论文、课程 PPT、讲义和阅读材料的本地优先工作台/);
   assert.match(html, /class="workspace-shell hydration-shell"/);
   assert.match(html, /aria-label="正在加载阅读器"/);
   assert.doesNotMatch(html, /Your site is taking shape|Building your site/);
 });
 
-test("keeps local PDF reading, direct Codex calls, scrolling, zoom, and mobile controls wired", async () => {
-  const [page, bridge, devScript, usbGateway, layout, styles, skill, pdfWorker] = await Promise.all([
+test("keeps local learning-material reading, direct Codex calls, scrolling, zoom, and mobile controls wired", async () => {
+  const [page, bridge, converter, devScript, usbGateway, layout, styles, skill, pdfWorker] = await Promise.all([
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
     readFile(new URL("../bridge/server.mjs", import.meta.url), "utf8"),
+    readFile(new URL("../bridge/document-converter.mjs", import.meta.url), "utf8"),
     readFile(new URL("../scripts/dev.mjs", import.meta.url), "utf8"),
     readFile(new URL("../scripts/usb-gateway.mjs", import.meta.url), "utf8"),
     readFile(new URL("../app/layout.tsx", import.meta.url), "utf8"),
@@ -51,11 +52,26 @@ test("keeps local PDF reading, direct Codex calls, scrolling, zoom, and mobile c
     readFile(new URL("../public/pdf.worker.min.mjs", import.meta.url), "utf8"),
   ]);
 
-  assert.match(page, /type="file"\s+accept="application\/pdf"/);
+  assert.match(page, /const DOCUMENT_ACCEPT = \[/);
+  assert.match(page, /"\.docx"/);
+  assert.match(page, /"\.pptx"/);
+  assert.match(page, /accept=\{DOCUMENT_ACCEPT\}/);
+  assert.match(page, /convertDocumentToPdf/);
+  assert.match(page, /\/convert-document/);
+  assert.match(page, /sourceFileName\?: string/);
+  assert.match(page, /sourceKind\?: SourceDocumentKind/);
   assert.match(page, /type AppView = "space" \| "reader"/);
   assert.match(page, /const LIBRARY_DB = "paperlens-local-library"/);
-  assert.match(page, /indexedDB\.open\(LIBRARY_DB, 1\)/);
+  assert.match(page, /本地优先 · 学习资料工作台/);
+  assert.match(page, /论文、课程 PPT、讲义和阅读材料/);
+  assert.match(page, /导入学习资料/);
+  assert.match(page, /indexedDB\.open\(LIBRARY_DB, 2\)/);
   assert.match(page, /createObjectStore\(LIBRARY_STORE, \{ keyPath: "id" \}\)/);
+  assert.match(page, /createObjectStore\(LIBRARY_FOLDER_STORE, \{ keyPath: "id" \}\)/);
+  assert.match(page, /putStoredFolder/);
+  assert.match(page, /movePaperToFolder/);
+  assert.match(page, /searchMentionTargets/);
+  assert.match(page, /rankFolderPaperContexts/);
   assert.match(page, /putStoredPaper/);
   assert.match(page, /getStoredPaper/);
   assert.match(page, /createPdfThumbnail/);
@@ -80,7 +96,34 @@ test("keeps local PDF reading, direct Codex calls, scrolling, zoom, and mobile c
   assert.match(page, /CODEX_BRIDGE/);
   assert.match(page, /const CODEX_BRIDGE = "\/api\/codex"/);
   assert.match(page, /mode: "translate"/);
-  assert.match(page, /mode: repositoryUrl \? "auto" : "chat"/);
+  assert.match(page, /mode: "terms"/);
+  assert.match(page, /parsePaperTerms/);
+  assert.match(page, /termsUpdatedAt/);
+  assert.match(page, /notes\?: Record<number, string>/);
+  assert.match(page, /notesUpdatedAt/);
+  assert.match(page, /setNotes\(stored\.notes \|\| \{\}\)/);
+  assert.match(page, /noteSaveQueueRef\.current = noteSaveQueueRef\.current/);
+  assert.match(page, /updateStoredPaper\(currentPaperId, \{ notes: nextNotes, notesUpdatedAt: Date\.now\(\) \}\)/);
+  assert.match(page, /value=\{notes\[pageNumber\] \|\| ""\}/);
+  assert.match(page, /自动保存/);
+  assert.doesNotMatch(page, /embodied agent/);
+  assert.match(page, /buildFullTranslationQueue/);
+  assert.match(page, /translateFullPaper/);
+  assert.match(page, /renderPdfPageForVision/);
+  assert.match(page, /visualPage: source\.visualOnly/);
+  assert.match(page, /第 \$\{sourcePage\} 页没有文字层，正在生成整页图片/);
+  assert.match(page, /翻译全文/);
+  assert.match(page, /translationUpdatedAt/);
+  assert.match(page, /persistTranslations/);
+  assert.match(page, /mode: activeRepositoryUrl \? "auto" : "chat"/);
+  assert.match(page, /inspectPdfIdentity/);
+  assert.match(page, /inferPaperTitle/);
+  assert.match(page, /aliases: identity\.aliases/);
+  assert.match(page, /getActivePaperMention/);
+  assert.match(page, /searchMentionPapers/);
+  assert.match(page, /loadReferencedPaperPages/);
+  assert.match(page, /rankPaperPages/);
+  assert.match(page, /从我的空间引用资料/);
   assert.match(page, /Math\.min\(pdf\.numPages, 4\)/);
   assert.match(page, /GitHub repository discovery failed/);
   assert.match(page, /在 GitHub 打开仓库/);
@@ -90,7 +133,23 @@ test("keeps local PDF reading, direct Codex calls, scrolling, zoom, and mobile c
   assert.match(page, /本次无需读取仓库/);
   assert.match(page, /pdf-text-layer/);
   assert.match(page, /highlight-mark/);
+  assert.match(page, /onPointerDown=\{startErasing\}/);
+  assert.match(page, /onPointerMove=\{moveEraser\}/);
+  assert.match(page, /eraseHighlightAtPoint/);
+  assert.match(page, /aria-label="橡皮擦"/);
+  assert.doesNotMatch(page, /onRemoveHighlight/);
+  assert.match(page, /type PaperComment/);
+  assert.match(page, /commentsUpdatedAt/);
+  assert.match(page, /persistComments/);
+  assert.match(page, /deleteStoredPaper/);
+  assert.match(page, /comment-anchor-mark/);
+  assert.match(page, /comment-pin/);
+  assert.match(page, /新建批注/);
+  assert.match(page, /删除《\$\{paper\.displayName\}》/);
   assert.match(page, /AI Chat/);
+  assert.match(page, /startChatResize/);
+  assert.match(page, /resizeChatFromKeyboard/);
+  assert.match(page, /调整资料阅读区和 AI Chat 高度/);
   assert.match(page, /detectCaptionFigureRegions/);
   assert.match(page, /refineFigureRegionsWithCanvas/);
   assert.match(page, /figure-region-target/);
@@ -104,7 +163,7 @@ test("keeps local PDF reading, direct Codex calls, scrolling, zoom, and mobile c
   assert.match(page, /handleStageScroll/);
   assert.match(page, /onScroll=\{handleStageScroll\}/);
   assert.match(page, /PdfPageView/);
-  assert.match(page, /aria-label="连续论文页面"/);
+  assert.match(page, /aria-label="连续资料页面"/);
   assert.match(page, /findClosestPageToViewportCenter/);
   assert.match(page, /shouldRenderPage\(targetPage, pageNumber\)/);
   assert.doesNotMatch(page, /accumulatePageTurnIntent|PAGE_TURN_COOLDOWN_MS|onWheel=\{handleStageWheel\}/);
@@ -119,7 +178,8 @@ test("keeps local PDF reading, direct Codex calls, scrolling, zoom, and mobile c
   assert.match(page, /data-translation-segment/);
   assert.match(page, /katex\.renderToString/);
   assert.match(page, /formulaExplanation/);
-  assert.match(page, /item\.role === "assistant" \? <ScientificText text=\{item\.text\} \/>/);
+  assert.match(page, /item\.role === "assistant" \? <ChatMarkdown text=\{item\.text\} \/>/);
+  assert.match(page, /from "\.\/chat-markdown"/);
   assert.match(page, /SOURCE_FORMULA/);
   assert.match(page, /jsonPunctuationEscape/);
   assert.match(page, /jsonUnicodeEscape/);
@@ -127,6 +187,9 @@ test("keeps local PDF reading, direct Codex calls, scrolling, zoom, and mobile c
   assert.match(page, /handleSourceClick/);
   assert.match(page, /selectionMadeRef/);
   assert.match(page, /mergeSelectionRects/);
+  assert.match(page, /if \(annotationMode === "highlight"\) \{\s*addHighlight\(nextSelection\);\s*selection\.removeAllRanges\(\);\s*return;/);
+  assert.match(page, /if \(annotationMode !== "select"\) return;\s*const target = \(event\.target as HTMLElement\)\.closest<HTMLElement>\("\[data-segment-id\]"\)/);
+  assert.doesNotMatch(page, /setHighlights[\s\S]{0,500}setSelectedText\(selection\.text\)/);
   assert.match(page, /selectionContextRects/);
   assert.match(page, /contextSegmentIds/);
   assert.match(page, /range\.intersectsNode/);
@@ -140,9 +203,15 @@ test("keeps local PDF reading, direct Codex calls, scrolling, zoom, and mobile c
 
   assert.match(bridge, /spawn\(codexPath/);
   assert.match(bridge, /materializeImages/);
+  assert.match(bridge, /PAPERLENS_VISUAL_PAGE/);
+  assert.match(bridge, /学习资料翻译助手/);
+  assert.match(bridge, /必须实际查看随请求附带的整页图片/);
   assert.match(bridge, /args\.push\("--image", path\)/);
   assert.match(bridge, /paperlens-images-/);
   assert.match(bridge, /图片上下文/);
+  assert.match(bridge, /referencedPaperContext/);
+  assert.match(bridge, /读者通过 @ 从“我的空间”引用的其他资料/);
+  assert.match(bridge, /必须明确写出资料名称和证据页码/);
   assert.match(bridge, /24 \* 1024 \* 1024/);
   assert.match(bridge, /"--sandbox", "read-only"/);
   assert.match(bridge, /GitHub MCP、alphaXiv/);
@@ -161,6 +230,15 @@ test("keeps local PDF reading, direct Codex calls, scrolling, zoom, and mobile c
   assert.match(bridge, /公式输出规则/);
   assert.match(bridge, /\[\[SOURCE_FORMULA\]\]/);
   assert.match(bridge, /127\.0\.0\.1/);
+  assert.match(bridge, /request\.url === "\/convert-document"/);
+  assert.match(bridge, /documentConversion/);
+  assert.match(bridge, /readBytes\(request\)/);
+  assert.match(converter, /OFFICE_DOCUMENT_EXTENSIONS/);
+  assert.match(converter, /"\.doc", "\.docx", "\.ppt", "\.pptx"/);
+  assert.match(converter, /--convert-to/);
+  assert.match(converter, /paperlens-convert-/);
+  assert.match(converter, /UserInstallation/);
+  assert.match(converter, /await rm\(directory, \{ recursive: true, force: true \}\)/);
   assert.match(devScript, /\["--hostname", "localhost"\]/);
   assert.match(devScript, /scripts\/usb-gateway\.mjs/);
   assert.match(devScript, /fileURLToPath/);
@@ -170,17 +248,31 @@ test("keeps local PDF reading, direct Codex calls, scrolling, zoom, and mobile c
   assert.match(usbGateway, /incoming\.on\("error", closeUpstream\)/);
   assert.match(usbGateway, /socket\.on\("error", destroyPair\)/);
   assert.match(usbGateway, /server\.on\("clientError"/);
-  assert.match(layout, /PaperLens 论文镜/);
+  assert.match(layout, /PaperLens · 学习资料阅读与理解工作台/);
   assert.match(styles, /\.pdf-stage \{[^}]*overflow: auto/);
   assert.match(styles, /\.pdf-document-flow \{[^}]*flex-direction: column;[^}]*gap: 18px/);
   assert.match(styles, /-webkit-overflow-scrolling: touch/);
   assert.match(styles, /scrollbar-gutter: stable both-edges/);
   assert.match(styles, /\.paper-frame \{[^}]*max-width: none/);
   assert.match(styles, /\.sync-segment-box/);
+  assert.match(styles, /\.full-translation-progress/);
+  assert.match(styles, /\.translate-all-button/);
   assert.match(styles, /\.figure-region-target/);
+  assert.match(styles, /\.comment-anchor-mark/);
+  assert.match(styles, /\.comment-editor/);
+  assert.match(styles, /\.paper-delete-button/);
   assert.match(styles, /\.chat-attachments/);
+  assert.match(styles, /\.chat-height-resizer/);
+  assert.match(styles, /body\.chat-resizing/);
+  assert.match(styles, /\.paper-mention-menu/);
+  assert.match(styles, /\.chat-paper-mentions/);
+  assert.match(styles, /\.chat-markdown-table/);
   assert.match(styles, /\.sync-segment-box\.context/);
   assert.match(styles, /\.sync-selection-line/);
+  assert.match(styles, /\.mode-highlight \.pdf-text-layer ::selection \{ background: rgba\(255,224,71,\.48\); \}/);
+  assert.match(styles, /\.mode-highlight \.sync-highlight-layer \{ display: none; \}/);
+  assert.match(styles, /\.mode-erase \.highlight-layer \{ z-index: 6; pointer-events: auto;/);
+  assert.match(styles, /\.eraser-tool-icon/);
   assert.match(styles, /\.thumbnail-item > \.thumbnail-label/);
   assert.doesNotMatch(styles, /\.thumbnail-item span \{/);
   assert.match(styles, /\.thumbnail-item i \.anticon \{[^}]*position: absolute;[^}]*inset: 0;[^}]*justify-content: center;[^}]*margin: 0;[^}]*padding: 0/);
