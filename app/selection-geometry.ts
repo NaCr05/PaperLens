@@ -1,9 +1,5 @@
 export type SelectionRect = { x: number; y: number; width: number; height: number; text: string };
 
-export function shouldLockMarkerToLine(startY: number, currentY: number, lineHeight: number): boolean {
-  return Math.abs(currentY - startY) <= Math.max(8, lineHeight * 1.15);
-}
-
 export function normalizeSelectionRect(
   rect: { left: number; top: number; right: number; bottom: number },
   frame: { left: number; top: number; width: number; height: number },

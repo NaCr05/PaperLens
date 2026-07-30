@@ -90,7 +90,8 @@ test("keeps local learning-material reading, direct Codex calls, scrolling, zoom
   assert.match(page, /canvas\.dataset\.outputScale/);
   assert.match(page, /\[displayWidth,[^\]]*pageNumber,[^\]]*pdf/);
   assert.match(page, /await renderTask\.promise[\s\S]*await page\.getTextContent\(\)/);
-  assert.match(page, /await \(textLayerTask as \{ render: \(\) => Promise<void> \}\)\.render\(\);[\s\S]{0,600}textLayer\.style\.width = `\$\{logicalViewport\.width\}px`/);
+  assert.match(page, /import\("pdfjs-dist\/web\/pdf_viewer\.mjs"\)/);
+  assert.match(page, /new TextLayerBuilder\([\s\S]{0,500}await textLayerBuilder\.render\([\s\S]{0,500}textLayer\.style\.width = `\$\{logicalViewport\.width\}px`/);
   assert.match(page, /renderTask\?\.cancel\(\)/);
   assert.match(page, /pdf\.numPages/);
   assert.match(page, /getTextContent\(\)/);
@@ -193,13 +194,16 @@ test("keeps local learning-material reading, direct Codex calls, scrolling, zoom
   assert.match(page, /handleSourceClick/);
   assert.match(page, /selectionMadeRef/);
   assert.match(page, /mergeSelectionRects/);
-  assert.match(page, /if \(annotationMode === "highlight"\) \{\s*addHighlight\(nextSelection\);\s*selection\.removeAllRanges\(\);\s*return;/);
+  assert.match(page, /onPointerUp=\{\(event\) => onPaperSelection\(pageNumber, event\.currentTarget\)\}/);
+  assert.match(page, /if \(annotationMode === "highlight"\) \{\s*addHighlight\(nextSelection\);\s*return;/);
+  assert.match(page, /setPendingSelection\(nextSelection\);\s*\}, \[addHighlight, annotationMode, startComment\]\);/);
+  assert.doesNotMatch(page, /setPendingSelection\(nextSelection\);\s*selection\.removeAllRanges\(\)/);
   assert.match(page, /if \(annotationMode !== "select"\) return;\s*const target = \(event\.target as HTMLElement\)\.closest<HTMLElement>\("\[data-segment-id\]"\)/);
   assert.doesNotMatch(page, /setHighlights[\s\S]{0,500}setSelectedText\(selection\.text\)/);
   assert.match(page, /selectionContextRects/);
   assert.match(page, /contextSegmentIds/);
   assert.match(page, /range\.intersectsNode/);
-  assert.match(page, /selection\.removeAllRanges\(\)/);
+  assert.match(page, /window\.getSelection\(\)\?\.removeAllRanges\(\)/);
   assert.match(page, /className="thumbnail-label"/);
   assert.match(page, /setChatContextKind\("paragraph"\)/);
   assert.match(page, /setChatContextKind\("selection"\)/);

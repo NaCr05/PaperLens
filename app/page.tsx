@@ -80,7 +80,7 @@ import {
   type PanelWidths,
   type ResizeSide,
 } from "./reader-workspace";
-import { mergeSelectionRects, normalizeSelectionRect, shouldLockMarkerToLine, type SelectionRect } from "./selection-geometry";
+import { mergeSelectionRects, normalizeSelectionRect, type SelectionRect } from "./selection-geometry";
 import { createVisualPageSegment, isVisualPageSegments, VISUAL_PAGE_SOURCE } from "./visual-page-translation";
 
 type PdfTextContent = { items: PdfTextItem[]; styles?: Record<string, unknown>; lang?: string | null };
@@ -120,14 +120,14 @@ type ProviderInfo = {
 type ProviderMap = Partial<Record<AIProviderId, ProviderInfo>>;
 type AISettings = { provider: AIProviderId; translationModel: string; chatModel: string; reasoningEffort: string };
 type HighlightRect = { id: string; groupId: string; x: number; y: number; width: number; height: number; text: string };
-type PendingSelection = { pageNumber: number; text: string; rects: SelectionRect[]; x: number; y: number };
-type TextCaret = { node: CharacterData; offset: number };
-type MarkerDragState = {
-  pointerId: number;
-  startCaret: TextCaret;
-  startClientY: number;
-  lineCenterY: number;
-  lineHeight: number;
+type PendingSelection = {
+  pageNumber: number;
+  text: string;
+  rects: SelectionRect[];
+  x: number;
+  y: number;
+  segmentIds?: string[];
+  primarySegmentId?: string;
 };
 type ChatMessage = { id: string; role: "user" | "assistant"; text: string; imageLabels?: string[]; paperLabels?: string[]; folderLabels?: string[]; repositoryUsed?: boolean; repositoryName?: string; providerLabel?: string; model?: string; usage?: AIUsage; latencyMs?: number; fallbackReason?: string };
 type ChatImageAttachment = { id: string; label: string; source: "paper" | "clipboard"; dataUrl: string; pageNumber?: number };
@@ -771,120 +771,6 @@ function AISettingsModal({
   );
 }
 
-function textNodeForSpan(span: HTMLElement): CharacterData | null {
-  const node = Array.from(span.childNodes).find((candidate) => candidate.nodeType === Node.TEXT_NODE && Boolean(candidate.textContent));
-  return node ? node as CharacterData : null;
-}
-
-function caretOffsetForClientX(node: CharacterData, clientX: number): number {
-  const length = node.data.length;
-  if (!length) return 0;
-  const fullRange = document.createRange();
-  fullRange.selectNodeContents(node);
-  const bounds = fullRange.getBoundingClientRect();
-  if (clientX <= bounds.left) return 0;
-  if (clientX >= bounds.right) return length;
-
-  let low = 0;
-  let high = length;
-  while (low < high) {
-    const middle = Math.floor((low + high) / 2);
-    const range = document.createRange();
-    range.setStart(node, 0);
-    range.setEnd(node, middle + 1);
-    if (range.getBoundingClientRect().right < clientX) low = middle + 1;
-    else high = middle;
-  }
-
-  const before = document.createRange();
-  before.setStart(node, 0);
-  before.setEnd(node, low);
-  const after = document.createRange();
-  after.setStart(node, 0);
-  after.setEnd(node, Math.min(length, low + 1));
-  return Math.abs(clientX - before.getBoundingClientRect().right) <= Math.abs(after.getBoundingClientRect().right - clientX)
-    ? low
-    : Math.min(length, low + 1);
-}
-
-function textCaretAtPoint(layer: HTMLElement, clientX: number, clientY: number): TextCaret | null {
-  const caretPosition = document.caretPositionFromPoint?.(clientX, clientY);
-  const legacyCaretRange = (document as Document & { caretRangeFromPoint?: (x: number, y: number) => Range | null }).caretRangeFromPoint?.(clientX, clientY);
-  const nativeNode = caretPosition?.offsetNode || legacyCaretRange?.startContainer || null;
-  const nativeOffset = caretPosition?.offset ?? legacyCaretRange?.startOffset ?? 0;
-  if (nativeNode && layer.contains(nativeNode)) {
-    if (nativeNode.nodeType === Node.TEXT_NODE) {
-      const node = nativeNode as CharacterData;
-      return { node, offset: Math.max(0, Math.min(node.data.length, nativeOffset)) };
-    }
-    const child = nativeNode.childNodes[nativeOffset] || nativeNode.childNodes[Math.max(0, nativeOffset - 1)];
-    if (child?.nodeType === Node.TEXT_NODE) {
-      const node = child as CharacterData;
-      return { node, offset: nativeOffset < nativeNode.childNodes.length ? 0 : node.data.length };
-    }
-  }
-
-  const candidates = Array.from(layer.querySelectorAll<HTMLElement>("span"))
-    .filter((span) => !span.querySelector("span") && Boolean(span.textContent?.trim()))
-    .map((span) => ({ span, rect: span.getBoundingClientRect() }))
-    .filter(({ rect }) => rect.width > 1 && rect.height > 1);
-  if (!candidates.length) return null;
-
-  const sameLine = candidates.filter(({ rect }) => clientY >= rect.top - 2 && clientY <= rect.bottom + 2);
-  const pool = sameLine.length ? sameLine : candidates;
-  const closest = pool.reduce((best, candidate) => {
-    const verticalDistance = clientY < candidate.rect.top ? candidate.rect.top - clientY : clientY > candidate.rect.bottom ? clientY - candidate.rect.bottom : 0;
-    const horizontalDistance = clientX < candidate.rect.left ? candidate.rect.left - clientX : clientX > candidate.rect.right ? clientX - candidate.rect.right : 0;
-    const score = verticalDistance * 4 + horizontalDistance;
-    return !best || score < best.score ? { ...candidate, score } : best;
-  }, null as null | { span: HTMLElement; rect: DOMRect; score: number });
-  const node = closest ? textNodeForSpan(closest.span) : null;
-  return node ? { node, offset: caretOffsetForClientX(node, clientX) } : null;
-}
-
-function markerRange(start: TextCaret, end: TextCaret): Range | null {
-  if (start.node === end.node && start.offset === end.offset) return null;
-  const startFirst = start.node === end.node
-    ? start.offset < end.offset
-    : Boolean(start.node.compareDocumentPosition(end.node) & Node.DOCUMENT_POSITION_FOLLOWING);
-  const range = document.createRange();
-  const first = startFirst ? start : end;
-  const last = startFirst ? end : start;
-  range.setStart(first.node, first.offset);
-  range.setEnd(last.node, last.offset);
-  return range;
-}
-
-function markerSelectionFromPoint(
-  layer: HTMLElement,
-  frame: HTMLElement,
-  pageNumber: number,
-  drag: MarkerDragState,
-  clientX: number,
-  clientY: number,
-): PendingSelection | null {
-  const effectiveY = shouldLockMarkerToLine(drag.startClientY, clientY, drag.lineHeight) ? drag.lineCenterY : clientY;
-  const endCaret = textCaretAtPoint(layer, clientX, effectiveY);
-  if (!endCaret) return null;
-  const range = markerRange(drag.startCaret, endCaret);
-  if (!range) return null;
-  const text = range.toString().replace(/\s+/g, " ").trim().slice(0, 6_000);
-  if (!text) return null;
-  const frameBounds = frame.getBoundingClientRect();
-  const rects = mergeSelectionRects(Array.from(range.getClientRects())
-    .map((rect) => normalizeSelectionRect(rect, frameBounds, text))
-    .filter((rect): rect is SelectionRect => Boolean(rect)));
-  if (!rects.length) return null;
-  const anchor = rects.at(-1)!;
-  return {
-    pageNumber,
-    text,
-    rects,
-    x: Math.min(frameBounds.width - 160, Math.max(8, (anchor.x + anchor.width) * frameBounds.width - 120)),
-    y: Math.max(8, anchor.y * frameBounds.height - 42),
-  };
-}
-
 function PdfPageView({
   pdf,
   pageNumber,
@@ -949,7 +835,7 @@ function PdfPageView({
   onPageSize: (pageNumber: number, size: PageSize) => void;
   onPageParsed: (pageNumber: number, result: { segments: PageSegment[]; figures: FigureRegion[]; text: string }) => void;
   onStatus: (pageNumber: number, message: string) => void;
-  onPaperSelection: (pageNumber: number, event: ReactMouseEvent<HTMLElement>) => void;
+  onPaperSelection: (pageNumber: number, frame: HTMLElement) => void;
   onSelectionStart: () => void;
   onSourceHover: (pageNumber: number, event: ReactMouseEvent<HTMLDivElement>) => void;
   onSourceLeave: () => void;
@@ -957,7 +843,7 @@ function PdfPageView({
   onEraseHighlights: (pageNumber: number, samples: EraserPoint[], radiusX: number, radiusY: number, eraseId: string) => void;
   onFigureHover: (figureId: string) => void;
   onAddFigure: (pageNumber: number, figure: FigureRegion) => void;
-  onAskSelection: () => void;
+  onAskSelection: (selection: PendingSelection) => void;
   onHighlightSelection: (selection: PendingSelection) => void;
   onStartComment: (selection: PendingSelection) => void;
   onEditComment: (comment: PaperComment) => void;
@@ -967,14 +853,12 @@ function PdfPageView({
   onDeleteComment: (commentId: string) => void;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const textLayerRef = useRef<HTMLDivElement>(null);
+  const textLayerHostRef = useRef<HTMLDivElement>(null);
   const frameRef = useRef<HTMLElement>(null);
   const pageRef = useRef<PdfPage | null>(null);
   const contentRef = useRef<PdfTextContent | null>(null);
   const renderSequenceRef = useRef(0);
   const parsedRef = useRef(false);
-  const markerDragRef = useRef<MarkerDragState | null>(null);
-  const [markerDraft, setMarkerDraft] = useState<PendingSelection | null>(null);
   const registerFrame = useCallback((frame: HTMLElement | null) => {
     frameRef.current = frame;
     onRegisterFrame(pageNumber, frame);
@@ -991,7 +875,11 @@ function PdfPageView({
     const sequence = ++renderSequenceRef.current;
     let cancelled = false;
     let renderTask: PdfRenderTask | null = null;
-    let textLayerTask: { cancel?: () => void } | null = null;
+    let textLayerBuilder: {
+      cancel: () => void;
+      div: HTMLDivElement;
+      render: (options: { viewport: never; images: never }) => Promise<void>;
+    } | null = null;
     let resizeObserver: ResizeObserver | null = null;
 
     const render = async () => {
@@ -1007,9 +895,9 @@ function PdfPageView({
       const outputScale = getPdfOutputScale(logicalViewport.width, logicalViewport.height);
       const renderViewport = page.getViewport({ scale: logicalScale * outputScale });
       const canvas = canvasRef.current;
-      const textLayer = textLayerRef.current;
+      const textLayerHost = textLayerHostRef.current;
       const frame = frameRef.current;
-      if (!canvas || !textLayer || !frame || cancelled) return;
+      if (!canvas || !textLayerHost || !frame || cancelled) return;
 
       canvas.width = Math.max(1, Math.round(renderViewport.width));
       canvas.height = Math.max(1, Math.round(renderViewport.height));
@@ -1033,13 +921,18 @@ function PdfPageView({
       }
       if (cancelled || sequence !== renderSequenceRef.current) return;
 
-      const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
-      textLayer.replaceChildren();
-      textLayer.style.width = `${logicalViewport.width}px`;
-      textLayer.style.height = `${logicalViewport.height}px`;
-      textLayerTask = new pdfjs.TextLayer({ textContentSource: content as never, container: textLayer, viewport: logicalViewport as never });
-      await (textLayerTask as { render: () => Promise<void> }).render();
+      const { TextLayerBuilder } = await import("pdfjs-dist/web/pdf_viewer.mjs");
+      textLayerHost.replaceChildren();
+      textLayerBuilder = new TextLayerBuilder({
+        pdfPage: page as never,
+        onAppend: (layer: HTMLDivElement) => {
+          layer.classList.add("pdf-text-layer");
+          textLayerHost.replaceChildren(layer);
+        },
+      });
+      await textLayerBuilder.render({ viewport: logicalViewport as never, images: undefined as never });
       if (cancelled || sequence !== renderSequenceRef.current) return;
+      const textLayer = textLayerBuilder.div;
       // PDF.js replaces the explicit dimensions with a CSS `round()` formula.
       // Without its full viewer variable set that formula collapses the layer
       // width to zero, so the visible text spans cannot receive pointer events.
@@ -1081,7 +974,7 @@ function PdfPageView({
     return () => {
       cancelled = true;
       renderTask?.cancel();
-      textLayerTask?.cancel?.();
+      textLayerBuilder?.cancel();
       resizeObserver?.disconnect();
     };
   }, [displayWidth, onPageParsed, onPageSize, onStatus, pageNumber, pdf, renderContent]);
@@ -1149,57 +1042,6 @@ function PdfPageView({
     if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
   };
 
-  const startMarkerDrag = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
-    if (annotationMode !== "highlight" || event.button !== 0) return;
-    const layer = textLayerRef.current;
-    if (!layer) return;
-    const startCaret = textCaretAtPoint(layer, event.clientX, event.clientY);
-    const startSpan = startCaret?.node.parentElement?.closest<HTMLElement>("span");
-    if (!startCaret || !startSpan || !layer.contains(startSpan)) return;
-    const lineBounds = startSpan.getBoundingClientRect();
-    markerDragRef.current = {
-      pointerId: event.pointerId,
-      startCaret,
-      startClientY: event.clientY,
-      lineCenterY: lineBounds.top + lineBounds.height / 2,
-      lineHeight: lineBounds.height,
-    };
-    event.currentTarget.setPointerCapture(event.pointerId);
-    event.preventDefault();
-    window.getSelection()?.removeAllRanges();
-    setMarkerDraft(null);
-    onSelectionStart();
-  }, [annotationMode, onSelectionStart]);
-
-  const updateMarkerDrag = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
-    const drag = markerDragRef.current;
-    const layer = textLayerRef.current;
-    const frame = frameRef.current;
-    if (!drag || drag.pointerId !== event.pointerId || !layer || !frame) return null;
-    event.preventDefault();
-    const next = markerSelectionFromPoint(layer, frame, pageNumber, drag, event.clientX, event.clientY);
-    setMarkerDraft(next);
-    return next;
-  }, [pageNumber]);
-
-  const finishMarkerDrag = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
-    const drag = markerDragRef.current;
-    if (!drag || drag.pointerId !== event.pointerId) return;
-    const next = updateMarkerDrag(event);
-    markerDragRef.current = null;
-    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
-    setMarkerDraft(null);
-    window.getSelection()?.removeAllRanges();
-    if (next) onHighlightSelection(next);
-  }, [onHighlightSelection, updateMarkerDrag]);
-
-  const cancelMarkerDrag = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
-    if (markerDragRef.current?.pointerId !== event.pointerId) return;
-    markerDragRef.current = null;
-    setMarkerDraft(null);
-    window.getSelection()?.removeAllRanges();
-  }, []);
-
   return (
     <article
       ref={registerFrame}
@@ -1207,7 +1049,7 @@ function PdfPageView({
       data-page-number={pageNumber}
       aria-label={`资料第 ${pageNumber} 页`}
       style={{ width: displayWidth, aspectRatio: `${pageSize.width}/${pageSize.height}` }}
-      onMouseUp={annotationMode === "highlight" ? undefined : (event) => onPaperSelection(pageNumber, event)}
+      onPointerUp={(event) => onPaperSelection(pageNumber, event.currentTarget)}
     >
       {renderContent ? (
         <>
@@ -1238,13 +1080,6 @@ function PdfPageView({
                 style={{ left: `${highlight.x * 100}%`, top: `${highlight.y * 100}%`, width: `${highlight.width * 100}%`, height: `${highlight.height * 100}%` }}
               />
             ))}
-            {markerDraft?.pageNumber === pageNumber && markerDraft.rects.map((rect, index) => (
-              <span
-                key={`marker-draft-${index}`}
-                className="highlight-mark draft"
-                style={{ left: `${rect.x * 100}%`, top: `${rect.y * 100}%`, width: `${rect.width * 100}%`, height: `${rect.height * 100}%` }}
-              />
-            ))}
           </div>
           <div className="comment-layer" aria-label={`第 ${pageNumber} 页批注`}>
             {comments.map((comment) => (
@@ -1270,16 +1105,12 @@ function PdfPageView({
             ))}
           </div>
           <div
-            ref={textLayerRef}
-            className="pdf-text-layer"
-            onMouseDown={annotationMode === "highlight" ? undefined : onSelectionStart}
+            ref={textLayerHostRef}
+            className="pdf-text-layer-host"
+            onMouseDown={annotationMode === "erase" ? undefined : onSelectionStart}
             onMouseMove={(event) => onSourceHover(pageNumber, event)}
             onMouseLeave={onSourceLeave}
             onClick={(event) => onSourceClick(pageNumber, event)}
-            onPointerDown={startMarkerDrag}
-            onPointerMove={updateMarkerDrag}
-            onPointerUp={finishMarkerDrag}
-            onPointerCancel={cancelMarkerDrag}
           />
           <div className="figure-region-layer" aria-label={`第 ${pageNumber} 页资料图片区域`}>
             {figures.map((figure) => (
@@ -1299,8 +1130,13 @@ function PdfPageView({
             ))}
           </div>
           {pendingSelection?.pageNumber === pageNumber && (
-            <div className="selection-bubble" style={{ left: pendingSelection.x, top: pendingSelection.y }}>
-              <button onClick={onAskSelection}><MessageOutlined /> 问 AI</button>
+            <div
+              className="selection-bubble"
+              style={{ left: pendingSelection.x, top: pendingSelection.y }}
+              onPointerDown={(event) => { event.preventDefault(); event.stopPropagation(); }}
+              onPointerUp={(event) => event.stopPropagation()}
+            >
+              <button onClick={() => onAskSelection(pendingSelection)}><MessageOutlined /> 问 AI</button>
               <button onClick={() => onHighlightSelection(pendingSelection)}><HighlightOutlined /> 标亮</button>
               <button onClick={() => onStartComment(pendingSelection)}><CommentOutlined /> 批注</button>
             </div>
@@ -2291,34 +2127,69 @@ export default function Home() {
     void persistComments(nextComments);
   }, [comments, persistComments]);
 
-  const handlePaperSelection = useCallback((sourcePage: number, event: ReactMouseEvent<HTMLElement>) => {
+  const commitSelectionContext = useCallback((selection: PendingSelection) => {
+    const segmentIds = selection.segmentIds || [];
+    const primarySegmentId = selection.primarySegmentId || segmentIds[0] || "";
+    setSelectedText(selection.text);
+    setChatContextKind("selection");
+    setContextSegmentId(primarySegmentId);
+    setContextSegmentIds(segmentIds.length ? segmentIds : primarySegmentId ? [primarySegmentId] : []);
+    setSelectionContextRects(selection.rects.map(({ x, y, width, height }) => ({ x, y, width, height })));
+    setPendingSelection(null);
+    window.getSelection()?.removeAllRanges();
+  }, []);
+
+  const askAboutSelection = useCallback((selection: PendingSelection) => {
+    commitSelectionContext(selection);
+    setChatOpen(true);
+    setMessage("选中文字已作为 AI Chat 上下文");
+    requestAnimationFrame(() => chatInputRef.current?.focus());
+  }, [commitSelectionContext]);
+
+  const handlePaperSelection = useCallback((sourcePage: number, frame: HTMLElement) => {
     if (annotationMode === "erase") return;
     const selection = window.getSelection();
-    const frame = event.currentTarget;
     const layer = frame.querySelector<HTMLElement>(".pdf-text-layer");
-    if (!selection || selection.isCollapsed || !selection.rangeCount || !frame || !layer) return;
+    if (!selection || selection.isCollapsed || !selection.rangeCount || !layer) return;
     const anchor = selection.anchorNode;
     const focus = selection.focusNode;
     if (!anchor || !focus || !layer.contains(anchor) || !layer.contains(focus)) return;
     const text = selection.toString().replace(/\s+/g, " ").trim().slice(0, 6_000);
     if (!text) return;
     const frameBounds = frame.getBoundingClientRect();
-    const rangeRects = Array.from(selection.getRangeAt(0).getClientRects()).filter((rect) => rect.width > 1 && rect.height > 1);
+    const range = selection.getRangeAt(0);
+    const rangeRects = Array.from(range.getClientRects()).filter((rect) => rect.width > 1 && rect.height > 1);
     if (!rangeRects.length) return;
-    const rects = mergeSelectionRects(rangeRects.map((rect) => ({
-      x: Math.max(0, (rect.left - frameBounds.left) / frameBounds.width),
-      y: Math.max(0, (rect.top - frameBounds.top) / frameBounds.height),
-      width: Math.min(1, rect.width / frameBounds.width),
-      height: Math.min(1, rect.height / frameBounds.height),
-      text,
-    })));
+    const rects = mergeSelectionRects(rangeRects
+      .map((rect) => normalizeSelectionRect(rect, frameBounds, text))
+      .filter((rect): rect is SelectionRect => Boolean(rect)));
+    if (!rects.length) return;
+
+    const anchorElement = anchor.nodeType === Node.ELEMENT_NODE ? anchor as HTMLElement : anchor.parentElement;
+    const focusElement = focus.nodeType === Node.ELEMENT_NODE ? focus as HTMLElement : focus.parentElement;
+    const anchorSegmentId = anchorElement?.closest<HTMLElement>("[data-segment-id]")?.dataset.segmentId || "";
+    const focusSegmentId = focusElement?.closest<HTMLElement>("[data-segment-id]")?.dataset.segmentId || "";
+    const selectedSegmentIds = Array.from(layer.querySelectorAll<HTMLElement>("[data-segment-id]"))
+      .filter((element) => range.intersectsNode(element))
+      .map((element) => element.dataset.segmentId || "")
+      .filter((segmentId, index, values) => segmentId && values.indexOf(segmentId) === index);
+    const primarySegmentId = anchorSegmentId || focusSegmentId || selectedSegmentIds[0] || "";
+    const firstRect = rangeRects[0];
     const lastRect = rangeRects.at(-1)!;
+    const bubbleWidth = 218;
+    const bubbleHeight = 39;
+    const anchorX = (lastRect.left + lastRect.right) / 2 - frameBounds.left;
+    const maxBubbleX = Math.max(8, frameBounds.width - bubbleWidth - 8);
+    const bubbleAbove = firstRect.top - frameBounds.top - bubbleHeight - 7;
+    const bubbleBelow = lastRect.bottom - frameBounds.top + 7;
     const nextSelection: PendingSelection = {
       pageNumber: sourcePage,
       text,
       rects,
-      x: Math.min(frameBounds.width - 160, Math.max(8, lastRect.right - frameBounds.left - 120)),
-      y: Math.max(8, lastRect.top - frameBounds.top - 42),
+      x: Math.min(maxBubbleX, Math.max(8, anchorX - bubbleWidth / 2)),
+      y: bubbleAbove >= 8 ? bubbleAbove : Math.min(frameBounds.height - bubbleHeight - 8, bubbleBelow),
+      segmentIds: selectedSegmentIds,
+      primarySegmentId,
     };
     selectionMadeRef.current = true;
     pageNumberRef.current = sourcePage;
@@ -2326,27 +2197,13 @@ export default function Home() {
     setHoveredSegmentId("");
     if (annotationMode === "highlight") {
       addHighlight(nextSelection);
-      selection.removeAllRanges();
       return;
     }
-    const anchorElement = anchor.nodeType === Node.ELEMENT_NODE ? anchor as HTMLElement : anchor.parentElement;
-    const focusElement = focus.nodeType === Node.ELEMENT_NODE ? focus as HTMLElement : focus.parentElement;
-    const anchorSegmentId = anchorElement?.closest<HTMLElement>("[data-segment-id]")?.dataset.segmentId || "";
-    const focusSegmentId = focusElement?.closest<HTMLElement>("[data-segment-id]")?.dataset.segmentId || "";
-    const range = selection.getRangeAt(0);
-    const selectedSegmentIds = Array.from(layer.querySelectorAll<HTMLElement>("[data-segment-id]"))
-      .filter((element) => range.intersectsNode(element))
-      .map((element) => element.dataset.segmentId || "")
-      .filter((segmentId, index, values) => segmentId && values.indexOf(segmentId) === index);
-    const primarySegmentId = anchorSegmentId || focusSegmentId || selectedSegmentIds[0] || "";
-    setSelectedText(text);
-    setChatContextKind("selection");
-    setContextSegmentId(primarySegmentId);
-    setContextSegmentIds(selectedSegmentIds.length ? selectedSegmentIds : primarySegmentId ? [primarySegmentId] : []);
-    setSelectionContextRects(rects.map(({ x, y, width, height }) => ({ x, y, width, height })));
-    if (annotationMode === "comment") startComment(nextSelection);
-    else setPendingSelection(nextSelection);
-    selection.removeAllRanges();
+    if (annotationMode === "comment") {
+      startComment(nextSelection);
+      return;
+    }
+    setPendingSelection(nextSelection);
   }, [addHighlight, annotationMode, startComment]);
 
   const eraseHighlights = useCallback((sourcePage: number, samples: EraserPoint[], radiusX: number, radiusY: number, eraseId: string) => {
@@ -3415,14 +3272,17 @@ export default function Home() {
                     onPageParsed={handlePageParsed}
                     onStatus={handlePageStatus}
                     onPaperSelection={handlePaperSelection}
-                    onSelectionStart={() => { selectionMadeRef.current = false; }}
+                    onSelectionStart={() => {
+                      selectionMadeRef.current = false;
+                      setPendingSelection(null);
+                    }}
                     onSourceHover={handleSourceHover}
                     onSourceLeave={() => setHoveredSegmentId("")}
                     onSourceClick={handleSourceClick}
                     onEraseHighlights={eraseHighlights}
                     onFigureHover={setHoveredFigureId}
                     onAddFigure={(sourcePage, figure) => { void addFigureToChat(sourcePage, figure); }}
-                    onAskSelection={() => { setChatOpen(true); setPendingSelection(null); window.getSelection()?.removeAllRanges(); requestAnimationFrame(() => chatInputRef.current?.focus()); }}
+                    onAskSelection={askAboutSelection}
                     onHighlightSelection={addHighlight}
                     onStartComment={startComment}
                     onEditComment={editComment}
