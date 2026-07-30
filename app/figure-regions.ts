@@ -1,3 +1,5 @@
+import { splitTextLineParts } from "./page-segment-geometry.ts";
+
 export type FigureTextItem = { str?: string; transform?: number[]; width?: number };
 export type FigureViewport = { width: number; height: number };
 export type FigureRegion = {
@@ -45,8 +47,8 @@ function buildLines(items: FigureTextItem[], viewport: FigureViewport): Position
     bucket.height = Math.max(bucket.height, item.height);
   }
 
-  return buckets.map((bucket) => {
-    const parts = bucket.parts.sort((a, b) => a.x - b.x);
+  return buckets.flatMap((bucket) => splitTextLineParts(bucket.parts, viewport.width).map((run) => {
+    const parts = run.sort((a, b) => a.x - b.x);
     const x = Math.min(...parts.map((part) => part.x));
     const right = Math.max(...parts.map((part) => part.x + part.width));
     const height = Math.max(...parts.map((part) => part.height));
@@ -62,7 +64,7 @@ function buildLines(items: FigureTextItem[], viewport: FigureViewport): Position
       top,
       bottom,
     };
-  }).sort((a, b) => a.top - b.top || a.x - b.x);
+  })).sort((a, b) => a.top - b.top || a.x - b.x);
 }
 
 export function detectCaptionFigureRegions(items: FigureTextItem[], viewport: FigureViewport, pageNumber: number): FigureRegion[] {
@@ -89,7 +91,12 @@ export function detectCaptionFigureRegions(items: FigureTextItem[], viewport: Fi
       const verticalGap = nextLine.top - previousCaptionLine.bottom;
       const nextCenter = (nextLine.x + nextLine.right) / 2;
       const sameLane = fullWidth || (nextCenter >= laneLeft && nextCenter <= laneRight);
-      const plausibleContinuation = verticalGap >= -.004 && verticalGap <= .014 && sameLane && nextLine.top - captionLine.top <= .15;
+      if (!sameLane) {
+        if (nextLine.top - previousCaptionLine.bottom > .014) break;
+        continue;
+      }
+      if (/^\d{1,3}$/.test(nextLine.text)) break;
+      const plausibleContinuation = verticalGap >= -.004 && verticalGap <= .014 && nextLine.top - captionLine.top <= .15;
       if (!plausibleContinuation || CAPTION_PATTERN.test(nextLine.text)) break;
       captionLines.push(nextLine);
     }

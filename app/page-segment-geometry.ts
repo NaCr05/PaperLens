@@ -24,6 +24,24 @@ export function splitTextLineParts<T extends TextLinePart>(parts: T[], viewportW
   return runs;
 }
 
+export function mergeAdjacentTextRects(rects: NormalizedTextRect[]): NormalizedTextRect[] {
+  const merged: NormalizedTextRect[] = [];
+  for (const rect of [...rects].sort((a, b) => a.y - b.y || a.x - b.x)) {
+    const previous = merged[merged.length - 1];
+    const sameLeft = previous && Math.abs(previous.x - rect.x) <= .006;
+    const sameRight = previous && Math.abs((previous.x + previous.width) - (rect.x + rect.width)) <= .012;
+    const verticalGap = previous ? rect.y - (previous.y + previous.height) : Number.POSITIVE_INFINITY;
+    if (previous && sameLeft && sameRight && verticalGap >= -.003 && verticalGap <= .006) {
+      const bottom = Math.max(previous.y + previous.height, rect.y + rect.height);
+      previous.y = Math.min(previous.y, rect.y);
+      previous.height = bottom - previous.y;
+      continue;
+    }
+    merged.push({ ...rect });
+  }
+  return merged;
+}
+
 export function mapPdfTextItemsToSegments(
   items: PdfTextGeometryItem[],
   segments: TextSegmentGeometry[],

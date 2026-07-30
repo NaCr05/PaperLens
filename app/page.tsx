@@ -55,8 +55,10 @@ import {
   type MentionRange,
   type PaperPageText,
 } from "./paper-mentions";
-import { alignRenderedTextToSegments, mapPdfTextItemsToSegments, splitTextLineParts } from "./page-segment-geometry";
+import { alignRenderedTextToSegments, mapPdfTextItemsToSegments, mergeAdjacentTextRects } from "./page-segment-geometry";
+import { buildPageSegments, type PageSegment, type PdfTextItem, type PdfViewport } from "./page-segmentation";
 import { parsePaperTerms, type PaperTerm } from "./paper-terms";
+import { buildDetectedPaperOutline, extractEmbeddedPaperOutline, selectMajorPaperOutline, type OutlineHeadingCandidate, type PaperOutlineItem } from "./paper-outline";
 import {
   DEFAULT_CHAT_HEIGHT,
   DEFAULT_PANEL_WIDTHS,
@@ -81,19 +83,21 @@ import {
 import { mergeSelectionRects, normalizeSelectionRect, shouldLockMarkerToLine, type SelectionRect } from "./selection-geometry";
 import { createVisualPageSegment, isVisualPageSegments, VISUAL_PAGE_SOURCE } from "./visual-page-translation";
 
-type PdfTextItem = { str?: string; transform?: number[]; width?: number };
 type PdfTextContent = { items: PdfTextItem[]; styles?: Record<string, unknown>; lang?: string | null };
-type PdfViewport = { width: number; height: number };
 type PdfRenderTask = { promise: Promise<void>; cancel: () => void };
 type PdfPage = {
   getViewport: (options: { scale: number }) => PdfViewport;
   getTextContent: () => Promise<PdfTextContent>;
   render: (options: { canvas: HTMLCanvasElement; viewport: PdfViewport; background?: string }) => PdfRenderTask;
 };
+type PdfOutlineNode = { title?: string; dest?: string | unknown[] | null; items?: PdfOutlineNode[] };
 type PdfDocument = {
   numPages: number;
   getPage: (pageNumber: number) => Promise<PdfPage>;
   getMetadata?: () => Promise<{ info?: Record<string, unknown> }>;
+  getOutline?: () => Promise<PdfOutlineNode[] | null>;
+  getDestination?: (id: string) => Promise<unknown[] | null>;
+  getPageIndex?: (reference: { num: number; gen: number }) => Promise<number>;
   destroy: () => Promise<void>;
 };
 type RightTab = "translation" | "outline" | "terms" | "notes";
@@ -152,10 +156,10 @@ type CommentEditorState = {
   anchorY: number;
   content: string;
 };
-type PageSegment = { id: string; text: string; kind: "heading" | "paragraph"; rects: SyncRect[] };
 type TranslatedSegment = { id: string; translation: string; formulaExplanation: string };
 type TranslationJob = "page" | "full";
 type FullTranslationStatus = "idle" | "running" | "paused" | "failed" | "complete";
+type OutlineStatus = "idle" | "loading" | "ready" | "failed";
 type FullTranslationProgress = {
   status: FullTranslationStatus;
   completed: number;
@@ -544,158 +548,6 @@ async function normalizePastedImage(file: File) {
   return canvas.toDataURL("image/png");
 }
 
-function median(values: number[]) {
-  if (!values.length) return 0;
-  const sorted = [...values].sort((a, b) => a - b);
-  return sorted[Math.floor(sorted.length / 2)];
-}
-
-function buildPageSegments(items: PdfTextItem[], viewport: PdfViewport, pageNumber: number): PageSegment[] {
-  type Positioned = { text: string; x: number; y: number; width: number; height: number };
-  type Lane = "wide" | "left" | "right";
-  type Line = { text: string; x: number; y: number; width: number; height: number; right: number; heading: boolean; lane: Lane };
-  type SegmentDraft = Omit<PageSegment, "id">;
-  const positioned: Positioned[] = items
-    .filter((item): item is Required<Pick<PdfTextItem, "str" | "transform">> & PdfTextItem => typeof item.str === "string" && item.str.trim().length > 0 && Array.isArray(item.transform))
-    .map((item) => ({
-      text: item.str!.trim(),
-      x: item.transform![4] ?? 0,
-      y: item.transform![5] ?? 0,
-      width: Math.max(item.width || 0, 1),
-      height: Math.max(Math.hypot(item.transform![2] || 0, item.transform![3] || 0), 6),
-    }));
-  if (!positioned.length) return [];
-
-  const midpoint = viewport.width / 2;
-  const lineBuckets: { y: number; parts: Positioned[] }[] = [];
-  for (const item of [...positioned].sort((a, b) => Math.abs(b.y - a.y) > 3 ? b.y - a.y : a.x - b.x)) {
-    let bucket = lineBuckets.find((candidate) => Math.abs(candidate.y - item.y) <= Math.max(3, item.height * .35));
-    if (!bucket) {
-      bucket = { y: item.y, parts: [] };
-      lineBuckets.push(bucket);
-    }
-    bucket.parts.push(item);
-  }
-
-  // Build real visual lines before deciding whether the page is one or two
-  // columns. A large horizontal gap is a column gutter; ordinary PDF text
-  // chunks on the same baseline stay together as one line.
-  const rawLines: Omit<Line, "heading" | "lane">[] = [];
-  for (const bucket of lineBuckets) {
-    for (const run of splitTextLineParts(bucket.parts, viewport.width)) {
-      const x = Math.min(...run.map((item) => item.x));
-      const right = Math.max(...run.map((item) => item.x + item.width));
-      const height = Math.max(...run.map((item) => item.height));
-      const text = run.map((item) => item.text).join(" ").replace(/\s+/g, " ").trim();
-      if (text) rawLines.push({ text, x, y: bucket.y, width: right - x, height, right });
-    }
-  }
-  rawLines.sort((a, b) => b.y - a.y || a.x - b.x);
-
-  const bodyHeight = median(rawLines.map((line) => line.height).filter((height) => height < 18)) || median(rawLines.map((line) => line.height)) || 9;
-  const bodyLines = rawLines.filter((line) => line.text.length > 10 && line.width > viewport.width * .1);
-  const isGeometricallyWide = (line: Omit<Line, "heading" | "lane">) => (
-    line.width > viewport.width * .56 ||
-    (line.x < midpoint - bodyHeight * 2.2 && line.right > midpoint + bodyHeight * 2.2)
-  );
-  const wideCount = bodyLines.filter(isGeometricallyWide).length;
-  const leftCount = bodyLines.filter((line) => !isGeometricallyWide(line) && line.x + line.width / 2 < midpoint).length;
-  const rightCount = bodyLines.filter((line) => !isGeometricallyWide(line) && line.x + line.width / 2 >= midpoint).length;
-  const twoColumnPage = leftCount >= 3 && rightCount >= 3 && wideCount / Math.max(bodyLines.length, 1) < .58;
-
-  const lines: Line[] = rawLines.map((line) => {
-    const lane: Lane = !twoColumnPage || isGeometricallyWide(line)
-      ? "wide"
-      : line.x + line.width / 2 < midpoint ? "left" : "right";
-    return {
-      ...line,
-      lane,
-      heading: line.height > bodyHeight * 1.35 || (line.text.length < 92 && (
-        /^(?:abstract|introduction|related work|background|method|approach|experiments?|results?|discussion|conclusion|references|appendix|acknowledgments?)$/i.test(line.text) ||
-        /^(?:\d+(?:\.\d+)*|[IVX]+)[\s.:]+.{1,72}$/i.test(line.text)
-      )),
-    };
-  });
-
-  const buildBlocks = (flow: Line[]): SegmentDraft[] => {
-    if (!flow.length) return [];
-    const ordered = [...flow].sort((a, b) => b.y - a.y || a.x - b.x);
-    const flowLeft = Math.min(...ordered.map((line) => line.x));
-    const flowRight = Math.max(...ordered.map((line) => line.right));
-    const flowWidth = Math.max(1, flowRight - flowLeft);
-    const baselineGaps = ordered.slice(1).map((line, index) => ordered[index].y - line.y).filter((gap) => gap > 2 && gap < bodyHeight * 2.2);
-    const normalGap = median(baselineGaps) || bodyHeight * 1.25;
-    const drafts: SegmentDraft[] = [];
-    let block: Line[] = [];
-    const flush = () => {
-      if (!block.length) return;
-      const text = block.map((line) => line.text).join("\n").replace(/-\n(?=[a-z])/g, "").replace(/\n/g, " ").replace(/\s+/g, " ").trim();
-      if (text) {
-        const rects = block.map((line) => ({
-          x: Math.max(0, line.x / viewport.width),
-          y: Math.max(0, 1 - (line.y + line.height) / viewport.height),
-          width: Math.min(1, Math.max(line.width / viewport.width, .008)),
-          height: Math.min(.08, Math.max((line.height * 1.28) / viewport.height, .009)),
-        }));
-        drafts.push({ text, kind: block.length === 1 && block[0].heading ? "heading" : "paragraph", rects });
-      }
-      block = [];
-    };
-
-    ordered.forEach((line, index) => {
-      const previous = ordered[index - 1];
-      const gap = previous ? previous.y - line.y : 0;
-      const indented = line.x - flowLeft > Math.max(bodyHeight * 1.1, flowWidth * .025);
-      const previousShort = previous ? previous.width < flowWidth * .72 : false;
-      const sentenceBreak = previous ? /[.!?。！？:]$/.test(previous.text) && /^[A-Z\d]/.test(line.text) : false;
-      const startsBlock = !previous || line.heading || previous.heading || gap > normalGap * 1.48 || (indented && (sentenceBreak || previousShort));
-      if (startsBlock && block.length) flush();
-      block.push(line);
-      // Keep genuinely long abstract paragraphs intact while still guarding
-      // against malformed PDFs that expose an entire page as one paragraph.
-      if (block.reduce((sum, item) => sum + item.text.length, 0) > 8_000) flush();
-    });
-    flush();
-    return drafts;
-  };
-
-  const drafts: SegmentDraft[] = [];
-  if (!twoColumnPage) {
-    drafts.push(...buildBlocks(lines));
-  } else {
-    const wideLines = lines.filter((line) => line.lane === "wide");
-    const normalGap = median(lines.slice(1).map((line, index) => lines[index].y - line.y).filter((gap) => gap > 2 && gap < bodyHeight * 2.2)) || bodyHeight * 1.25;
-    const wideBands: { top: number; bottom: number; lines: Line[] }[] = [];
-    for (const line of wideLines) {
-      const band = wideBands[wideBands.length - 1];
-      if (!band || band.bottom - line.y > normalGap * 2.2) {
-        wideBands.push({ top: line.y, bottom: line.y, lines: [line] });
-      } else {
-        band.bottom = line.y;
-        band.lines.push(line);
-      }
-    }
-
-    let upperBoundary = Number.POSITIVE_INFINITY;
-    const appendColumnRegion = (top: number, bottom: number) => {
-      const region = lines.filter((line) => line.lane !== "wide" && line.y < top && line.y > bottom);
-      drafts.push(...buildBlocks(region.filter((line) => line.lane === "left")));
-      drafts.push(...buildBlocks(region.filter((line) => line.lane === "right")));
-    };
-    for (const band of wideBands) {
-      appendColumnRegion(upperBoundary, band.top + .01);
-      drafts.push(...buildBlocks(band.lines));
-      const sideLinesInsideBand = lines.filter((line) => line.lane !== "wide" && line.y <= band.top + .01 && line.y >= band.bottom - .01);
-      drafts.push(...buildBlocks(sideLinesInsideBand.filter((line) => line.lane === "left")));
-      drafts.push(...buildBlocks(sideLinesInsideBand.filter((line) => line.lane === "right")));
-      upperBoundary = band.bottom - .01;
-    }
-    appendColumnRegion(upperBoundary, Number.NEGATIVE_INFINITY);
-  }
-
-  return drafts.map((segment, index) => ({ ...segment, id: `p${pageNumber}-s${index + 1}` }));
-}
-
 function parseTranslatedSegments(answer: string, source: PageSegment[]): TranslatedSegment[] {
   const cleaned = answer.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
   let repaired = "";
@@ -787,18 +639,19 @@ function paddedSyncRect(rect: SyncRect): SyncRect {
 }
 
 function SegmentOverlay({ segment, label, tone }: { segment: PageSegment; label: string; tone: "preview" | "context" }) {
-  const left = Math.min(...segment.rects.map((rect) => rect.x));
-  const top = Math.min(...segment.rects.map((rect) => rect.y));
-  const right = Math.max(...segment.rects.map((rect) => rect.x + rect.width));
-  const bottom = Math.max(...segment.rects.map((rect) => rect.y + rect.height));
-  const rect = paddedSyncRect({ x: left, y: top, width: right - left, height: bottom - top });
+  const rects = mergeAdjacentTextRects(segment.rects).map(paddedSyncRect);
   return (
-    <span
-      className={`sync-segment-box ${tone} ${rect.y < .03 ? "label-below" : ""}`}
-      style={{ left: `${rect.x * 100}%`, top: `${rect.y * 100}%`, width: `${rect.width * 100}%`, height: `${rect.height * 100}%` }}
-    >
-      <i>{label}</i>
-    </span>
+    <>
+      {rects.map((rect, index) => (
+        <span
+          key={`${segment.id}-${index}`}
+          className={`sync-segment-box ${tone} ${rect.y < .03 ? "label-below" : ""}`}
+          style={{ left: `${rect.x * 100}%`, top: `${rect.y * 100}%`, width: `${rect.width * 100}%`, height: `${rect.height * 100}%` }}
+        >
+          {index === 0 && <i>{label}</i>}
+        </span>
+      ))}
+    </>
   );
 }
 
@@ -1200,7 +1053,9 @@ function PdfPageView({
       resizeObserver = new ResizeObserver(syncTextLayer);
       resizeObserver.observe(frame);
 
-      const nextSegments = buildPageSegments(content.items, baseViewport, pageNumber);
+      const roughFigures = detectCaptionFigureRegions(content.items, baseViewport, pageNumber);
+      const nextFigures = refineFigureRegionsWithCanvas(roughFigures, canvas);
+      const nextSegments = buildPageSegments(content.items, baseViewport, pageNumber, nextFigures);
       const textSpans = Array.from(textLayer.querySelectorAll<HTMLElement>("span"))
         .filter((span) => !span.querySelector("span") && Boolean(span.textContent?.trim()));
       const itemOwners = mapPdfTextItemsToSegments(content.items, nextSegments, baseViewport.width, baseViewport.height);
@@ -1211,7 +1066,6 @@ function PdfPageView({
       });
 
       if (!parsedRef.current) {
-        const nextFigures = refineFigureRegionsWithCanvas(detectCaptionFigureRegions(content.items, baseViewport, pageNumber), canvas);
         const text = nextSegments.map((segment) => segment.text).join("\n\n").trim().slice(0, 28_000);
         parsedRef.current = true;
         onPageParsed(pageNumber, { segments: nextSegments, figures: nextFigures, text });
@@ -1512,6 +1366,7 @@ export default function Home() {
   const chatAbortRef = useRef<AbortController | null>(null);
   const noteSaveQueueRef = useRef<Promise<void>>(Promise.resolve());
   const progressThumbnailTokenRef = useRef(0);
+  const outlineLoadTokenRef = useRef(0);
   const resizeDragRef = useRef<{ side: ResizeSide; startX: number; startWidths: PanelWidths } | null>(null);
   const chatResizeDragRef = useRef<{ startY: number; startHeight: number } | null>(null);
   const [appView, setAppView] = useState<AppView>("space");
@@ -1533,6 +1388,10 @@ export default function Home() {
   const [pageSegments, setPageSegments] = useState<Record<number, PageSegment[]>>({});
   const [translations, setTranslations] = useState<Record<number, TranslatedSegment[]>>({});
   const [paperTerms, setPaperTerms] = useState<Record<number, PaperTerm[]>>({});
+  const [paperOutline, setPaperOutline] = useState<PaperOutlineItem[]>([]);
+  const [outlineStatus, setOutlineStatus] = useState<OutlineStatus>("idle");
+  const [outlineProgress, setOutlineProgress] = useState({ completed: 0, total: 0 });
+  const [outlineError, setOutlineError] = useState("");
   const [extractingTermsPage, setExtractingTermsPage] = useState(0);
   const [termsError, setTermsError] = useState("");
   const [highlights, setHighlights] = useState<Record<number, HighlightRect[]>>({});
@@ -1973,6 +1832,54 @@ export default function Home() {
     if (pageNumberRef.current === targetPage) setMessage(nextMessage);
   }, []);
 
+  const loadPaperOutline = useCallback(async () => {
+    if (!pdf) return;
+    const loadToken = ++outlineLoadTokenRef.current;
+    setOutlineStatus("loading");
+    setOutlineProgress({ completed: 0, total: pdf.numPages });
+    setOutlineError("");
+    try {
+      const embeddedOutline = await extractEmbeddedPaperOutline(pdf);
+      if (loadToken !== outlineLoadTokenRef.current) return;
+      if (embeddedOutline.length >= 2) {
+        setPaperOutline(selectMajorPaperOutline(embeddedOutline));
+        setOutlineProgress({ completed: pdf.numPages, total: pdf.numPages });
+        setOutlineStatus("ready");
+        return;
+      }
+
+      const candidates: OutlineHeadingCandidate[] = [];
+      const batchSize = 4;
+      for (let offset = 1; offset <= pdf.numPages; offset += batchSize) {
+        const pageNumbers = Array.from({ length: Math.min(batchSize, pdf.numPages - offset + 1) }, (_, index) => offset + index);
+        const batch = await Promise.all(pageNumbers.map(async (targetPage) => {
+          const page = await pdf.getPage(targetPage);
+          const [content, viewport] = await Promise.all([page.getTextContent(), Promise.resolve(page.getViewport({ scale: 1 }))]);
+          return buildPageSegments(content.items, viewport, targetPage)
+            .filter((segment) => segment.kind === "heading")
+            .map((segment) => ({ title: segment.text, pageNumber: targetPage }));
+        }));
+        if (loadToken !== outlineLoadTokenRef.current) return;
+        candidates.push(...batch.flat());
+        setOutlineProgress({ completed: Math.min(pdf.numPages, offset + pageNumbers.length - 1), total: pdf.numPages });
+      }
+
+      const detectedOutline = buildDetectedPaperOutline(candidates);
+      setPaperOutline(selectMajorPaperOutline(detectedOutline.length ? detectedOutline : embeddedOutline));
+      setOutlineStatus("ready");
+    } catch (error) {
+      if (loadToken !== outlineLoadTokenRef.current) return;
+      console.error("Paper outline extraction failed", error);
+      setPaperOutline([]);
+      setOutlineError(error instanceof Error ? error.message : "无法读取全文目录");
+      setOutlineStatus("failed");
+    }
+  }, [pdf]);
+
+  useEffect(() => {
+    if (rightTab === "outline" && pdf && outlineStatus === "idle") void loadPaperOutline();
+  }, [loadPaperOutline, outlineStatus, pdf, rightTab]);
+
   useEffect(() => {
     if (!pdf || appView !== "reader" || pendingInitialPageRef.current === null) return;
     const targetPage = pendingInitialPageRef.current;
@@ -1987,6 +1894,7 @@ export default function Home() {
 
   const loadFile = useCallback(async (file?: File, options: LoadPdfOptions = {}) => {
     if (!file) return;
+    outlineLoadTokenRef.current += 1;
     const importedFile = file;
     const inputKind = sourceDocumentKind(file.name, file.type);
     const importedKind = options.sourceKind || inputKind;
@@ -2046,6 +1954,10 @@ export default function Home() {
       setPageSegments({});
       setTranslations({});
       setPaperTerms({});
+      setPaperOutline([]);
+      setOutlineStatus("idle");
+      setOutlineProgress({ completed: 0, total: nextPdf.numPages });
+      setOutlineError("");
       setNotes({});
       setFullTranslation({ status: "idle", completed: 0, total: nextPdf.numPages, currentPage: 0, failedPages: [] });
       setHighlights({});
@@ -2459,7 +2371,8 @@ export default function Home() {
     const page = await pdf.getPage(sourcePage);
     const viewport = page.getViewport({ scale: 1 });
     const content = await page.getTextContent();
-    const segments = buildPageSegments(content.items, viewport, sourcePage);
+    const figures = detectCaptionFigureRegions(content.items, viewport, sourcePage);
+    const segments = buildPageSegments(content.items, viewport, sourcePage, figures);
     const text = segments.map((segment) => segment.text).join("\n\n").trim().slice(0, 28_000);
     if (!text || !segments.length) {
       setMessage(`第 ${sourcePage} 页没有文字层，正在生成整页图片…`);
@@ -3648,7 +3561,7 @@ export default function Home() {
                   </div>
                 )}
                 <div className="chat-composer-row">
-                  <textarea ref={chatInputRef} value={chatInput} onChange={handleChatInputChange} onPaste={handleChatPaste} onKeyDown={handleChatInputKeyDown} placeholder={chatImages.length ? "询问图片；输入 @ 还可引用空间资料…" : repositoryUrl ? "问当前资料或代码实现；输入 @ 引用其他资料…" : "问当前页；输入 @ 引用我的空间资料…"} />
+                  <textarea ref={chatInputRef} value={chatInput} onChange={handleChatInputChange} onPaste={handleChatPaste} onKeyDown={handleChatInputKeyDown} placeholder={chatImages.length ? "询问图片；输入 @ 还可引用资料或文件夹…" : repositoryUrl ? "问当前资料或代码实现；输入 @ 引用资料或文件夹…" : "问当前页；输入 @ 引用资料或文件夹…"} />
                   <button disabled={!isChatting && !chatInput.trim() && !chatImages.length} onClick={() => void sendChat()} aria-label={isChatting ? "停止生成" : "发送问题"}>{isChatting ? <CloseOutlined /> : <SendOutlined />}</button>
                 </div>
               </div>
@@ -3726,7 +3639,17 @@ export default function Home() {
               usage={lastTranslationPage === pageNumber ? lastTranslationUsage : undefined}
             />
           )}
-          {rightTab === "outline" && <OutlineView text={currentTranslation || currentText} />}
+          {rightTab === "outline" && (
+            <OutlineView
+              items={paperOutline}
+              currentPage={pageNumber}
+              status={outlineStatus}
+              progress={outlineProgress}
+              error={outlineError}
+              onSelect={changePage}
+              onRetry={() => void loadPaperOutline()}
+            />
+          )}
           {rightTab === "terms" && (
             <TermsView
               pageNumber={pageNumber}
@@ -3740,7 +3663,7 @@ export default function Home() {
           {rightTab === "notes" && <textarea className="notes-area" value={notes[pageNumber] || ""} onChange={(event) => updatePageNote(event.target.value)} placeholder="记录这一页的理解、疑问或实验启发…（自动保存）" />}
         </div>
 
-        {!currentTranslation && (
+        {rightTab === "translation" && !currentTranslation && (
           <div className="translation-footer">
             <span>{message}</span>
             <div>
@@ -3820,15 +3743,16 @@ function TranslationView({ pageNumber, sourceSegments, translatedSegments, loadi
   if (loading) {
     return <div className="translation-loading"><span /><span /><span /><span /><span /></div>;
   }
-  if (!translatedSegments.length) {
+  const sourceById = new Map(sourceSegments.map((segment) => [segment.id, segment]));
+  const compatibleTranslations = translatedSegments.filter((segment) => sourceById.has(segment.id));
+  if (!compatibleTranslations.length || compatibleTranslations.length !== sourceSegments.length) {
     return <div className="right-empty"><TranslationOutlined /><strong>第 {pageNumber} 页尚未翻译</strong><span>{sourceSegments.length ? `由 ${providerLabel} 保留公式、引用和专业术语` : "若本页没有文字层，将自动读取整页图片"}</span><div className="right-empty-actions"><button onClick={onTranslate}>翻译本页</button><button className="secondary" onClick={onTranslateAll}>{fullTranslationLabel}</button></div></div>;
   }
-  const visualPage = isVisualPageSegments(sourceSegments) || translatedSegments.some((segment) => /-visual$/.test(segment.id));
-  const sourceById = new Map(sourceSegments.map((segment) => [segment.id, segment]));
+  const visualPage = isVisualPageSegments(sourceSegments) || compatibleTranslations.some((segment) => /-visual$/.test(segment.id));
   return (
     <article className="translated-article">
       <div className="article-kicker">第 {pageNumber} 页 · {providerLabel} 中文译文 · {visualPage ? "整页视觉识别" : "段落同步已开启"}{usage ? ` · ${usageSummary(usage)}` : ""}</div>
-      {translatedSegments.map((segment) => {
+      {compatibleTranslations.map((segment) => {
         const source = sourceById.get(segment.id);
         const heading = source?.kind === "heading";
         const active = segment.id === activeSegmentId;
@@ -3863,9 +3787,50 @@ function TranslationView({ pageNumber, sourceSegments, translatedSegments, loadi
   );
 }
 
-function OutlineView({ text }: { text: string }) {
-  const sections = text.split(/\n+/).map((line) => line.trim()).filter((line) => line.length > 4).slice(0, 8);
-  return <div className="outline-view"><h3>本页内容</h3>{sections.length ? sections.map((line, index) => <button key={index}><span>{String(index + 1).padStart(2, "0")}</span>{line.slice(0, 80)}</button>) : <p>翻译当前页后，这里会生成便于跳读的内容索引。</p>}</div>;
+function OutlineView({ items, currentPage, status, progress, error, onSelect, onRetry }: {
+  items: PaperOutlineItem[];
+  currentPage: number;
+  status: OutlineStatus;
+  progress: { completed: number; total: number };
+  error: string;
+  onSelect: (pageNumber: number) => void;
+  onRetry: () => void;
+}) {
+  return (
+    <div className="outline-view">
+      <header>
+        <div><h3>全文目录</h3><span>{items.length ? `${items.length} 个章节 · 点击标题跳转` : "按论文大标题生成"}</span></div>
+      </header>
+      {status === "loading" ? (
+        <div className="outline-loading" role="status" aria-live="polite">
+          <span>正在读取全文结构…</span>
+          <progress value={progress.completed} max={Math.max(1, progress.total)} />
+          <small>{progress.completed}/{progress.total} 页</small>
+        </div>
+      ) : status === "failed" ? (
+        <div className="outline-empty"><p>{error || "全文目录读取失败"}</p><button type="button" onClick={onRetry}>重新读取</button></div>
+      ) : items.length ? (
+        <nav aria-label="论文全文目录">
+          {items.map((item, index) => (
+            <button
+              type="button"
+              key={item.id}
+              className={item.pageNumber === currentPage ? "active" : ""}
+              style={{ paddingLeft: `${8 + Math.min(item.level, 4) * 14}px` }}
+              onClick={() => onSelect(item.pageNumber)}
+              aria-label={`${item.title}，第 ${item.pageNumber} 页`}
+            >
+              <span className="outline-index">{String(index + 1).padStart(2, "0")}</span>
+              <strong>{item.title}</strong>
+              <span className="outline-page">{item.pageNumber}</span>
+            </button>
+          ))}
+        </nav>
+      ) : (
+        <div className="outline-empty"><p>这份资料没有可识别的章节标题。</p><span>如果 PDF 含有文字层，PaperLens 会识别 Abstract、Introduction、Method 等大标题。</span></div>
+      )}
+    </div>
+  );
 }
 
 function TermsView({ pageNumber, hasText, terms, loading, error, onRefresh }: {

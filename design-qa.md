@@ -260,3 +260,19 @@ The Vinext build emits a non-blocking optimize-imports warning for the Ant Desig
 - Small vertical drift remains locked to the starting line; moving beyond the line-lock threshold still produces an intentional multi-line highlight.
 - Real browser regression on LingBot-VA 2.0 page 2 dragged from x `300` to blank-space x `820` with a 6 px downward drift. It committed one row ending at the text line's measured right edge (`715.27 px`). A fragmented line ended at its final fragment (`749.14 px`), and a deliberate 37 px vertical drag continued to select four rows.
 - The production build and all 52 Node regressions pass.
+# 文件夹与 AI Chat 整文件夹引用 — 2026-07-30
+
+- “我的空间”支持创建持久化文件夹、按文件夹筛选资料，并通过论文卡片上的下拉控件移动归档；从 IndexedDB v1 自动升级到 v2，保留既有论文、译文、笔记和批注。
+- 删除文件夹只解除归档，不删除其中资料。向当前文件夹导入或拖放的新资料会自动归入该文件夹。
+- AI Chat 的 `@` 菜单同时搜索论文和文件夹；空查询时优先显示非空文件夹，文件夹候选明确显示资料数量和“按问题检索整个文件夹”。
+- 发送问题时会扫描被引用文件夹中的全部论文，并在受控上下文预算内选择最相关的最多 5 份论文及证据页；回答提示要求说明实际采用的资料名称和页码。
+- 真实页面验证完成：创建文件夹、把论文移入文件夹、打开论文、输入 `@QA`、选择整个文件夹，折叠栏和编辑器均显示文件夹引用状态。
+- TypeScript、生产构建及全部 54 项 Node 回归测试通过；浏览器控制台无应用错误。
+
+# 全文目录与章节跳转 — 2026-07-30
+
+- “内容”不再截取当前页正文或译文，而是生成与翻译状态无关的全文目录；优先读取 PDF 内置书签，没有书签时扫描全文文字层和标题几何信息。
+- 目录只保留 Abstract、Introduction、Method、Experiments、Conclusion、References 等主章节层级，并过滤公式变量、FPS 数值、表格列名和正文碎片。
+- 每个目录项显示真实 PDF 页码；点击后复用连续阅读区的 `changePage` 跳转，页码输入框、左侧缩略图、中心 PDF 位置和右侧当前章节状态同步更新。
+- 扫描期间展示全文页数进度；读取失败时可重试。未翻译页面不会再用底部“翻译本页”浮层遮挡目录。
+- 真实浏览器验收使用 29 页 `LingBot_VA2_paper.pdf`：识别 8 个主章节，点击 `3 Data Recipe` 后页码、缩略图和原文均定位到第 15 页，目录项同步高亮；验收后的控制台无新增应用错误。

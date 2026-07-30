@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { alignRenderedTextToSegments, mapPdfTextItemsToSegments, splitTextLineParts } from "../app/page-segment-geometry.ts";
+import { alignRenderedTextToSegments, mapPdfTextItemsToSegments, mergeAdjacentTextRects, splitTextLineParts } from "../app/page-segment-geometry.ts";
 
 test("separates compact neighboring columns without splitting ordinary text chunks", () => {
   const runs = splitTextLineParts([
@@ -38,4 +38,16 @@ test("aligns rendered spans after PDF.js omits an empty or structural item", () 
     { text: "Beta", segmentId: "p2-s2" },
   ];
   assert.deepEqual(alignRenderedTextToSegments(["Alpha", "Beta"], owners), ["p2-s1", "p2-s2"]);
+});
+
+test("keeps disjoint paragraph rows out of one oversized overlay box", () => {
+  const rects = mergeAdjacentTextRects([
+    { x: .1, y: .2, width: .45, height: .02 },
+    { x: .1, y: .22, width: .45, height: .02 },
+    { x: .1, y: .24, width: .28, height: .02 },
+  ]);
+  assert.equal(rects.length, 2);
+  assert.deepEqual(rects[0], { x: .1, y: .2, width: .45, height: rects[0].height });
+  assert.ok(Math.abs(rects[0].height - .04) < 1e-9);
+  assert.deepEqual(rects[1], { x: .1, y: .24, width: .28, height: .02 });
 });

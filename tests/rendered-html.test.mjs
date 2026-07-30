@@ -40,8 +40,9 @@ test("server-renders the PaperLens reader shell and metadata", async () => {
 });
 
 test("keeps local learning-material reading, direct Codex calls, scrolling, zoom, and mobile controls wired", async () => {
-  const [page, bridge, converter, devScript, usbGateway, layout, styles, skill, pdfWorker] = await Promise.all([
+  const [page, segmentation, bridge, converter, devScript, usbGateway, layout, styles, skill, pdfWorker] = await Promise.all([
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/page-segmentation.ts", import.meta.url), "utf8"),
     readFile(new URL("../bridge/server.mjs", import.meta.url), "utf8"),
     readFile(new URL("../bridge/document-converter.mjs", import.meta.url), "utf8"),
     readFile(new URL("../scripts/dev.mjs", import.meta.url), "utf8"),
@@ -113,6 +114,11 @@ test("keeps local learning-material reading, direct Codex calls, scrolling, zoom
   assert.match(page, /visualPage: source\.visualOnly/);
   assert.match(page, /第 \$\{sourcePage\} 页没有文字层，正在生成整页图片/);
   assert.match(page, /翻译全文/);
+  assert.match(page, /extractEmbeddedPaperOutline/);
+  assert.match(page, /buildDetectedPaperOutline/);
+  assert.match(page, /全文目录/);
+  assert.match(page, /onSelect=\{changePage\}/);
+  assert.match(page, /rightTab === "translation" && !currentTranslation/);
   assert.match(page, /translationUpdatedAt/);
   assert.match(page, /persistTranslations/);
   assert.match(page, /mode: activeRepositoryUrl \? "auto" : "chat"/);
@@ -120,7 +126,7 @@ test("keeps local learning-material reading, direct Codex calls, scrolling, zoom
   assert.match(page, /inferPaperTitle/);
   assert.match(page, /aliases: identity\.aliases/);
   assert.match(page, /getActivePaperMention/);
-  assert.match(page, /searchMentionPapers/);
+  assert.match(page, /searchMentionTargets/);
   assert.match(page, /loadReferencedPaperPages/);
   assert.match(page, /rankPaperPages/);
   assert.match(page, /从我的空间引用资料/);
@@ -169,11 +175,11 @@ test("keeps local learning-material reading, direct Codex calls, scrolling, zoom
   assert.doesNotMatch(page, /accumulatePageTurnIntent|PAGE_TURN_COOLDOWN_MS|onWheel=\{handleStageWheel\}/);
   assert.match(page, /适合宽度（100%）/);
   assert.match(page, /buildPageSegments/);
-  assert.match(page, /splitTextLineParts/);
+  assert.match(segmentation, /splitTextLineParts/);
   assert.match(page, /mapPdfTextItemsToSegments/);
   assert.match(page, /alignRenderedTextToSegments/);
-  assert.match(page, /const twoColumnPage = leftCount >= 3 && rightCount >= 3/);
-  assert.match(page, /> 8_000/);
+  assert.match(segmentation, /const twoColumnPage = leftCount >= 3 && rightCount >= 3/);
+  assert.match(segmentation, /> 8_000/);
   assert.match(page, /data-segment-id/);
   assert.match(page, /data-translation-segment/);
   assert.match(page, /katex\.renderToString/);
