@@ -13,6 +13,7 @@ export type PdfTextItem = {
 export type PdfViewport = { width: number; height: number };
 export type SyncRect = { x: number; y: number; width: number; height: number };
 export type PageSegment = { id: string; text: string; kind: "heading" | "paragraph"; rects: SyncRect[] };
+export type StoredTranslationSegment = { id: string; translation?: string };
 
 type Positioned = {
   text: string;
@@ -40,7 +41,38 @@ type Line = {
 };
 
 type SegmentDraft = Omit<PageSegment, "id"> & { topY: number };
-const SEGMENTATION_VERSION = 2;
+export const SEGMENTATION_VERSION = 2;
+
+export function isPageTranslationCompatible(
+  pageNumber: number,
+  translatedSegments: readonly StoredTranslationSegment[],
+  sourceSegments?: readonly Pick<PageSegment, "id">[],
+) {
+  if (!translatedSegments.length || translatedSegments.some((segment) => !segment.translation?.trim())) return false;
+  const visualId = `p${pageNumber}-visual`;
+  const visualTranslation = translatedSegments.length === 1 && translatedSegments[0].id === visualId;
+  if (visualTranslation) return !sourceSegments || (sourceSegments.length === 1 && sourceSegments[0].id === visualId);
+
+  const prefix = `p${pageNumber}-v${SEGMENTATION_VERSION}-s`;
+  const indices = translatedSegments.map((segment) => {
+    if (!segment.id.startsWith(prefix)) return 0;
+    return Number(segment.id.slice(prefix.length));
+  });
+  const validVersionedSequence = indices.every((index) => Number.isInteger(index) && index > 0)
+    && new Set(indices).size === indices.length
+    && indices.every((_, index) => indices.includes(index + 1));
+  if (!validVersionedSequence) return false;
+  if (!sourceSegments) return true;
+  if (sourceSegments.length !== translatedSegments.length) return false;
+  const translatedIds = new Set(translatedSegments.map((segment) => segment.id));
+  return sourceSegments.every((segment) => translatedIds.has(segment.id));
+}
+
+export function compatibleTranslationPages(translations: Record<number, readonly StoredTranslationSegment[]>) {
+  return Object.entries(translations)
+    .filter(([page, segments]) => isPageTranslationCompatible(Number(page), segments))
+    .map(([page]) => Number(page));
+}
 
 function median(values: number[]) {
   if (!values.length) return 0;

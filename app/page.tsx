@@ -56,7 +56,7 @@ import {
   type PaperPageText,
 } from "./paper-mentions";
 import { alignRenderedTextToSegments, mapPdfTextItemsToSegments, mergeAdjacentTextRects } from "./page-segment-geometry";
-import { buildPageSegments, type PageSegment, type PdfTextItem, type PdfViewport } from "./page-segmentation";
+import { buildPageSegments, compatibleTranslationPages, isPageTranslationCompatible, type PageSegment, type PdfTextItem, type PdfViewport } from "./page-segmentation";
 import { parsePaperTerms, type PaperTerm } from "./paper-terms";
 import { buildDetectedPaperOutline, extractEmbeddedPaperOutline, selectMajorPaperOutline, type OutlineHeadingCandidate, type PaperOutlineItem } from "./paper-outline";
 import {
@@ -1380,6 +1380,18 @@ export default function Home() {
             ? "已保存，可继续翻译剩余页面"
             : "一次准备全部页面，之后翻页无需等待";
 
+  useEffect(() => {
+    if (!pdf || translationJob === "full") return;
+    const completed = compatibleTranslationPages(translations).length;
+    setFullTranslation((previous) => {
+      const status = completed >= pdf.numPages
+        ? "complete"
+        : previous.status === "complete" ? "idle" : previous.status;
+      if (previous.completed === completed && previous.total === pdf.numPages && previous.status === status) return previous;
+      return { ...previous, status, completed, total: pdf.numPages };
+    });
+  }, [pdf, translationJob, translations]);
+
   const displayPageWidth = Math.max(240, Math.min(pageSize.width, stageAvailableWidth) * zoom);
 
   const checkCodexBridge = useCallback(async () => {
@@ -1948,7 +1960,7 @@ export default function Home() {
         sourceKind: stored.sourceKind || "pdf",
       });
       const restoredTranslations = stored.translations || {};
-      const completed = Object.values(restoredTranslations).filter((segments) => segments.length > 0).length;
+      const completed = compatibleTranslationPages(restoredTranslations).length;
       setTranslations(restoredTranslations);
       setPaperTerms(stored.terms || {});
       setNotes(stored.notes || {});
@@ -2368,7 +2380,7 @@ export default function Home() {
       setLastTranslationUsage(result.usage);
       setLastTranslationProvider(providerDisplayName(result.provider, result.model));
       setLastTranslationPage(sourcePage);
-      const completed = Object.values(nextTranslations).filter((segments) => segments.length > 0).length;
+      const completed = compatibleTranslationPages(nextTranslations).length;
       setFullTranslation((previous) => {
         const failedPages = previous.failedPages.filter((failedPage) => failedPage !== sourcePage);
         const failedReasons = Object.fromEntries(Object.entries(previous.failedReasons || {}).filter(([failedPage]) => Number(failedPage) !== sourcePage));
@@ -2414,7 +2426,7 @@ export default function Home() {
     }
 
     let nextTranslations = { ...translations };
-    const translatedPages = Object.entries(nextTranslations).filter(([, segments]) => segments.length > 0).map(([page]) => Number(page));
+    const translatedPages = compatibleTranslationPages(nextTranslations);
     const queue = buildFullTranslationQueue(pdf.numPages, pageNumber, translatedPages);
     if (!queue.length) {
       setFullTranslation((previous) => ({ ...previous, status: "complete", completed: pdf.numPages, total: pdf.numPages, currentPage: 0, failedPages: [] }));
@@ -2446,7 +2458,7 @@ export default function Home() {
           if (source.visualOnly) setMessage(`正在识别并翻译第 ${sourcePage} 页图片 · 已完成 ${completed}/${pdf.numPages}`);
           const { result, translated } = await translatePageSource(sourcePage, source, controller.signal);
           nextTranslations = { ...nextTranslations, [sourcePage]: translated };
-          completed = Object.values(nextTranslations).filter((segments) => segments.length > 0).length;
+          completed = compatibleTranslationPages(nextTranslations).length;
           consecutiveFailures = 0;
           accumulatedUsage = mergeTranslationUsage(accumulatedUsage, result.usage);
           lastProviderLabel = providerDisplayName(result.provider, result.model);
@@ -2466,7 +2478,7 @@ export default function Home() {
         }
       }
 
-      const completedPages = Object.entries(nextTranslations).filter(([, segments]) => segments.length > 0).map(([page]) => Number(page));
+      const completedPages = compatibleTranslationPages(nextTranslations);
       const remaining = buildFullTranslationQueue(pdf.numPages, pageNumber, completedPages);
       if (remaining.length || failedPages.length) {
         setFullTranslation({ status: "failed", completed, total: pdf.numPages, currentPage: 0, failedPages, failedReasons, usage: accumulatedUsage, providerLabel: lastProviderLabel });
@@ -3663,10 +3675,12 @@ function TranslationView({ pageNumber, sourceSegments, translatedSegments, loadi
     return <div className="translation-loading"><span /><span /><span /><span /><span /></div>;
   }
   const sourceById = new Map(sourceSegments.map((segment) => [segment.id, segment]));
-  const compatibleTranslations = translatedSegments.filter((segment) => sourceById.has(segment.id));
-  if (!compatibleTranslations.length || compatibleTranslations.length !== sourceSegments.length) {
-    return <div className="right-empty"><TranslationOutlined /><strong>第 {pageNumber} 页尚未翻译</strong><span>{sourceSegments.length ? `由 ${providerLabel} 保留公式、引用和专业术语` : "若本页没有文字层，将自动读取整页图片"}</span><div className="right-empty-actions"><button onClick={onTranslate}>翻译本页</button><button className="secondary" onClick={onTranslateAll}>{fullTranslationLabel}</button></div></div>;
+  const translationCompatible = isPageTranslationCompatible(pageNumber, translatedSegments, sourceSegments);
+  if (!translationCompatible) {
+    const needsRefresh = translatedSegments.length > 0;
+    return <div className="right-empty"><TranslationOutlined /><strong>{needsRefresh ? `第 ${pageNumber} 页译文需要更新` : `第 ${pageNumber} 页尚未翻译`}</strong><span>{needsRefresh ? "原文段落结构已更新，本页会自动重新加入全文翻译队列" : sourceSegments.length ? `由 ${providerLabel} 保留公式、引用和专业术语` : "若本页没有文字层，将自动读取整页图片"}</span><div className="right-empty-actions"><button onClick={onTranslate}>{needsRefresh ? "重新翻译本页" : "翻译本页"}</button><button className="secondary" onClick={onTranslateAll}>{fullTranslationLabel}</button></div></div>;
   }
+  const compatibleTranslations = translatedSegments.filter((segment) => sourceById.has(segment.id));
   const visualPage = isVisualPageSegments(sourceSegments) || compatibleTranslations.some((segment) => /-visual$/.test(segment.id));
   return (
     <article className="translated-article">

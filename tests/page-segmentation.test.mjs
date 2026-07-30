@@ -1,11 +1,33 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { buildPageSegments } from "../app/page-segmentation.ts";
+import { buildPageSegments, compatibleTranslationPages, isPageTranslationCompatible } from "../app/page-segmentation.ts";
 
 const viewport = { width: 600, height: 840 };
 const transform = (x, y, size = 10) => [size, 0, 0, size, x, y];
 const item = (str, x, y, width, fontName = "body", size = 10) => ({ str, transform: transform(x, y, size), width, fontName });
+
+test("accepts only complete translations from the current paragraph structure", () => {
+  const current = [
+    { id: "p8-v2-s1", translation: "第一段" },
+    { id: "p8-v2-s2", translation: "第二段" },
+  ];
+  const source = [{ id: "p8-v2-s1" }, { id: "p8-v2-s2" }];
+  assert.equal(isPageTranslationCompatible(8, current, source), true);
+  assert.equal(isPageTranslationCompatible(8, [{ id: "p8-s1", translation: "旧译文" }], source), false);
+  assert.equal(isPageTranslationCompatible(8, [{ id: "p8-v2-s1", translation: "第一段" }], source), false);
+  assert.equal(isPageTranslationCompatible(8, [{ id: "p8-v2-s1", translation: "" }, current[1]], source), false);
+});
+
+test("counts only compatible pages and keeps stale cache out of full translation progress", () => {
+  const pages = compatibleTranslationPages({
+    7: [{ id: "p7-v2-s1", translation: "当前译文" }],
+    8: [{ id: "p8-s1", translation: "旧版译文" }],
+    9: [{ id: "p9-v2-s1", translation: "" }],
+    10: [{ id: "p10-visual", translation: "整页图片译文" }],
+  });
+  assert.deepEqual(pages, [7, 10]);
+});
 
 test("keeps inline-heading paragraphs separate and excludes text embedded in a figure", () => {
   const items = [
