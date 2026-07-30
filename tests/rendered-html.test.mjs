@@ -103,7 +103,7 @@ test("keeps local learning-material reading, direct Codex calls, scrolling, zoom
   assert.match(page, /termsUpdatedAt/);
   assert.match(page, /notes\?: Record<number, string>/);
   assert.match(page, /notesUpdatedAt/);
-  assert.match(page, /setNotes\(stored\.notes \|\| \{\}\)/);
+  assert.match(page, /setNotes\(existingStored\?\.notes \|\| \{\}\)/);
   assert.match(page, /noteSaveQueueRef\.current = noteSaveQueueRef\.current/);
   assert.match(page, /updateStoredPaper\(currentPaperId, \{ notes: nextNotes, notesUpdatedAt: Date\.now\(\) \}\)/);
   assert.match(page, /value=\{notes\[pageNumber\] \|\| ""\}/);
@@ -174,7 +174,7 @@ test("keeps local learning-material reading, direct Codex calls, scrolling, zoom
   assert.match(page, /onPaste=\{handleChatPaste\}/);
   assert.match(page, /normalizePastedImage/);
   assert.match(page, /chat-attachments/);
-  assert.match(page, /images: chatImages\.map/);
+  assert.match(page, /images: \[\.\.\.chatPageSource\.images, \.\.\.chatImages\]\.map/);
   assert.match(page, /aria-label="移动端视图"/);
   assert.match(page, /changeZoom/);
   assert.match(page, /handleStageScroll/);
