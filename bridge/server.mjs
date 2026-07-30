@@ -3,11 +3,21 @@ import { createServer } from "node:http";
 import { access, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
+import { loadEnvFile } from "node:process";
 import { fileURLToPath } from "node:url";
+import { ProviderError, normalizeProviderError } from "./provider-errors.mjs";
+import { INVOCATION_MODES, PROVIDER_IDS, resolveProviderRoute } from "./provider-routing.mjs";
+import { createMiMoProvider } from "./providers/mimo.mjs";
+import { createOpenAIProvider } from "./providers/openai.mjs";
 
 const HOST = "127.0.0.1";
 const PORT = Number(process.env.PAPERLENS_CODEX_PORT || 43123);
 const PROJECT_ROOT = fileURLToPath(new URL("../", import.meta.url));
+try {
+  loadEnvFile(join(PROJECT_ROOT, ".env"));
+} catch (error) {
+  if (error?.code !== "ENOENT") throw error;
+}
 const CODEX_CANDIDATES = [process.env.PAPERLENS_CODEX_PATH, "/opt/homebrew/bin/codex", "/usr/local/bin/codex"].filter(Boolean);
 const CODEX_ROOT = process.env.CODEX_HOME || join(homedir(), ".codex");
 const PAPER_READER_SKILL = process.env.PAPERLENS_SKILL_PATH || join(CODEX_ROOT, "skills", "paper-reader", "SKILL.md");
@@ -17,18 +27,23 @@ const ALLOWED_ORIGINS = new Set([
 ]);
 
 let codexPath = "codex";
-let activeRequest = false;
+let codexAvailable = false;
+const activeProviders = new Set();
 let skillAvailable = false;
 
 for (const candidate of CODEX_CANDIDATES) {
   try {
     await access(candidate);
     codexPath = candidate;
+    codexAvailable = true;
     break;
   } catch {
     // Continue to the next known installation path.
   }
 }
+
+const openAIProvider = createOpenAIProvider();
+const mimoProvider = createMiMoProvider();
 
 try {
   await access(PAPER_READER_SKILL);
@@ -188,7 +203,7 @@ function extractRepositoryDecision(answer, mode) {
   return { answer: cleaned, repositoryDecision: mode === "auto" ? "unreported" : "not-applicable" };
 }
 
-async function runCodex(payload) {
+async function runCodex(payload, { signal } = {}) {
   const imageBundle = await materializeImages(payload);
   try {
     return await new Promise((resolve, reject) => {
@@ -212,9 +227,16 @@ async function runCodex(payload) {
     let stderr = "";
     let settled = false;
 
+    const abort = () => {
+      if (settled) return;
+      child.kill("SIGTERM");
+      reject(new ProviderError("请求已取消", { code: "request_aborted", status: 499, provider: "local-codex" }));
+    };
+    signal?.addEventListener("abort", abort, { once: true });
+
     const timeout = setTimeout(() => {
       child.kill("SIGTERM");
-      reject(new Error("Codex 响应超时，请稍后重试"));
+      reject(new ProviderError("Codex 响应超时，请稍后重试", { code: "upstream_timeout", status: 504, retryable: true, provider: "local-codex" }));
     }, repositoryMode ? 360_000 : 240_000);
 
     child.stdout.on("data", (chunk) => {
@@ -239,10 +261,12 @@ async function runCodex(payload) {
     });
     child.on("error", (error) => {
       clearTimeout(timeout);
+      signal?.removeEventListener("abort", abort);
       if (!settled) reject(error);
     });
     child.on("close", (code) => {
       clearTimeout(timeout);
+      signal?.removeEventListener("abort", abort);
       settled = true;
       const answer = answers.at(-1)?.trim();
       if (code === 0 && answer) resolve({ ...extractRepositoryDecision(answer, payload.mode), threadId });
@@ -255,6 +279,75 @@ async function runCodex(payload) {
   }
 }
 
+function providerHealth() {
+  return {
+    "local-codex": {
+      id: "local-codex",
+      label: "本机 Codex",
+      configured: codexAvailable,
+      available: codexAvailable,
+      busy: activeProviders.has("local-codex"),
+      skillAvailable,
+      capabilities: { text: true, images: true, structuredOutput: true, repositoryVerification: true },
+    },
+    openai: {
+      id: "openai",
+      label: openAIProvider.label,
+      configured: openAIProvider.configured,
+      available: openAIProvider.configured,
+      busy: activeProviders.has("openai"),
+      capabilities: openAIProvider.capabilities,
+      models: openAIProvider.models,
+      allowedModels: openAIProvider.allowedModels,
+      reasoningEffort: openAIProvider.reasoningEffort,
+    },
+    mimo: {
+      id: "mimo",
+      label: mimoProvider.label,
+      configured: mimoProvider.configured,
+      available: mimoProvider.configured,
+      busy: activeProviders.has("mimo"),
+      capabilities: mimoProvider.capabilities,
+      models: mimoProvider.models,
+      allowedModels: mimoProvider.allowedModels,
+    },
+  };
+}
+
+function normalizeModel(value, fallback, allowedModels) {
+  const candidate = compact(value, 80);
+  return allowedModels.includes(candidate) ? candidate : fallback;
+}
+
+async function invokeProvider(providerId, payload, requestOptions) {
+  if (providerId === "openai") {
+    const model = normalizeModel(
+      payload.mode === "translate" ? requestOptions.translationModel : requestOptions.chatModel,
+      payload.mode === "translate" ? openAIProvider.models.translation : openAIProvider.models.chat,
+      openAIProvider.allowedModels,
+    );
+    return openAIProvider.invoke(payload, {
+      prompt: buildPrompt(payload),
+      signal: requestOptions.signal,
+      model,
+      effort: requestOptions.reasoningEffort,
+    });
+  }
+  if (providerId === "mimo") {
+    const model = normalizeModel(
+      payload.mode === "translate" ? requestOptions.translationModel : requestOptions.chatModel,
+      payload.mode === "translate" ? mimoProvider.models.translation : mimoProvider.models.chat,
+      mimoProvider.allowedModels,
+    );
+    return mimoProvider.invoke(payload, { prompt: buildPrompt(payload), signal: requestOptions.signal, model });
+  }
+  if (!codexAvailable) {
+    throw new ProviderError("未检测到本机 Codex CLI", { code: "provider_not_configured", status: 503, provider: "local-codex" });
+  }
+  const result = await runCodex(payload, { signal: requestOptions.signal });
+  return { ...result, provider: "local-codex", model: "Codex CLI" };
+}
+
 const server = createServer(async (request, response) => {
   const origin = request.headers.origin || "";
   if (request.method === "OPTIONS") {
@@ -263,31 +356,87 @@ const server = createServer(async (request, response) => {
     return;
   }
   if (request.method === "GET" && request.url === "/health") {
-    sendJson(response, 200, { ok: true, service: "PaperLens Codex bridge", codexPath, skillAvailable, busy: activeRequest }, origin);
+    sendJson(response, 200, {
+      ok: true,
+      service: "PaperLens AI bridge",
+      defaultProvider: "local-codex",
+      providers: providerHealth(),
+    }, origin);
+    return;
+  }
+  if (request.method === "POST" && request.url === "/test-provider") {
+    try {
+      const payload = await readJson(request);
+      const providerId = PROVIDER_IDS.includes(payload.provider) ? payload.provider : "local-codex";
+      if (providerId === "openai") {
+        const result = await openAIProvider.testConnection();
+        sendJson(response, 200, { ...result, provider: providerId }, origin);
+      } else if (providerId === "mimo") {
+        const result = await mimoProvider.testConnection();
+        sendJson(response, 200, { ...result, provider: providerId }, origin);
+      } else if (codexAvailable) {
+        sendJson(response, 200, { ok: true, provider: providerId, skillAvailable }, origin);
+      } else {
+        throw new ProviderError("未检测到本机 Codex CLI", { code: "provider_not_configured", status: 503, provider: providerId });
+      }
+    } catch (error) {
+      const normalized = normalizeProviderError(error, "unknown");
+      sendJson(response, normalized.status, { error: normalized.message, code: normalized.code, provider: normalized.provider, retryable: normalized.retryable }, origin);
+    }
     return;
   }
   if (request.method !== "POST" || request.url !== "/invoke") {
     sendJson(response, 404, { error: "Not found" }, origin);
     return;
   }
-  if (activeRequest) {
-    sendJson(response, 429, { error: "Codex 正在处理上一条请求" }, origin);
-    return;
-  }
 
+  let activeProvider = "";
   try {
     const payload = await readJson(request);
-    if (!["translate", "chat", "auto", "repository"].includes(payload.mode)) throw new Error("不支持的 Codex 模式");
-    activeRequest = true;
-    const result = await runCodex(payload);
-    sendJson(response, 200, result, origin);
+    if (!INVOCATION_MODES.includes(payload.mode)) {
+      throw new ProviderError("不支持的 AI 模式", { code: "invalid_mode", status: 400, provider: "unknown" });
+    }
+    const requestedProvider = PROVIDER_IDS.includes(payload.provider) ? payload.provider : "local-codex";
+    const availability = Object.fromEntries(Object.entries(providerHealth()).map(([id, state]) => [id, state.available]));
+    const route = resolveProviderRoute(payload, requestedProvider, availability);
+    if (route.unsupportedReason) {
+      throw new ProviderError(route.unsupportedReason, { code: "capability_unavailable", status: 503, provider: route.provider });
+    }
+    activeProvider = route.provider;
+    if (activeProviders.has(activeProvider)) {
+      const activeLabel = activeProvider === "openai" ? "OpenAI API" : activeProvider === "mimo" ? "MiMo API" : "本机 Codex";
+      throw new ProviderError(`${activeLabel} 正在处理上一条请求`, { code: "provider_busy", status: 429, retryable: true, provider: activeProvider });
+    }
+    activeProviders.add(activeProvider);
+    const controller = new AbortController();
+    request.on("aborted", () => controller.abort());
+    response.on("close", () => { if (!response.writableEnded) controller.abort(); });
+    const startedAt = Date.now();
+    const result = await invokeProvider(activeProvider, route.payload, {
+      signal: controller.signal,
+      translationModel: payload.translationModel,
+      chatModel: payload.chatModel,
+      reasoningEffort: payload.reasoningEffort,
+    });
+    sendJson(response, 200, {
+      ...result,
+      latencyMs: Date.now() - startedAt,
+      fallbackReason: route.fallbackReason,
+      repositoryDecision: route.repositoryDecision || result.repositoryDecision,
+    }, origin);
   } catch (error) {
-    sendJson(response, 500, { error: error instanceof Error ? error.message : "Codex 调用失败" }, origin);
+    const normalized = normalizeProviderError(error, activeProvider || "unknown");
+    sendJson(response, normalized.status, {
+      error: normalized.message,
+      code: normalized.code,
+      provider: normalized.provider,
+      retryable: normalized.retryable,
+    }, origin);
   } finally {
-    activeRequest = false;
+    if (activeProvider) activeProviders.delete(activeProvider);
   }
 });
 
 server.listen(PORT, HOST, () => {
-  console.log(`PaperLens Codex bridge: http://${HOST}:${PORT}`);
+  console.log(`PaperLens AI bridge: http://${HOST}:${PORT}`);
 });

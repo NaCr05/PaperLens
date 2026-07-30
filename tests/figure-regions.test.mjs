@@ -6,7 +6,7 @@ import { detectCaptionFigureRegions, findFigureContentTop } from "../app/figure-
 const viewport = { width: 600, height: 800 };
 const item = (str, x, y, width, height = 10) => ({ str, width, transform: [height, 0, 0, height, x, y] });
 
-test("detects a full-width captioned figure and includes its caption", () => {
+test("detects a full-width captioned figure while keeping its caption outside the crop", () => {
   const regions = detectCaptionFigureRegions([
     item("Prior paragraph with enough words to establish the prose boundary above the architecture figure.", 36, 700, 528),
     item("Figure 2. Overview of the proposed architecture and its training stages.", 52, 420, 496),
@@ -25,6 +25,7 @@ test("detects a full-width captioned figure and includes its caption", () => {
   assert.match(regions[0].caption, /final caption line/);
   assert.doesNotMatch(regions[0].caption, /Model Architecture/);
   assert.ok(regions[0].captionRect.height > .025);
+  assert.ok(regions[0].rect.y + regions[0].rect.height <= regions[0].captionRect.y);
 });
 
 test("keeps a two-column figure inside the caption column", () => {

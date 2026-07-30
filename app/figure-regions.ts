@@ -108,7 +108,6 @@ export function detectCaptionFigureRegions(items: FigureTextItem[], viewport: Fi
     let figureTop = nearestProse ? Math.max(maxHeightTop, nearestProse.bottom + .012) : maxHeightTop;
     if (figureBottom - figureTop < .09) figureTop = Math.max(.025, figureBottom - (fullWidth ? .24 : .2));
 
-    const cropBottom = Math.min(.985, lastCaptionLine.bottom + .009);
     const captionLeft = Math.min(...captionLines.map((line) => line.x));
     const captionRight = Math.max(...captionLines.map((line) => line.right));
     regions.push({
@@ -119,7 +118,7 @@ export function detectCaptionFigureRegions(items: FigureTextItem[], viewport: Fi
         x: laneLeft / viewport.width,
         y: figureTop,
         width: (laneRight - laneLeft) / viewport.width,
-        height: Math.max(.1, cropBottom - figureTop),
+        height: Math.max(.06, figureBottom - figureTop),
       },
       captionRect: {
         x: captionLeft / viewport.width,
@@ -180,7 +179,7 @@ export function refineFigureRegionsWithCanvas(regions: FigureRegion[], canvas: H
       }
       rowDensities[startY + localY] = ink / Math.max(1, samples);
     }
-    const gapTolerance = Math.max(10, Math.round(canvas.height * .034));
+    const gapTolerance = Math.max(12, Math.min(34, Math.round(canvas.height * .026)));
     const contentTop = findFigureContentTop(rowDensities, startY, endY, gapTolerance);
     if (contentTop === null) return region;
     const refinedTop = Math.max(0, contentTop / canvas.height - .012);

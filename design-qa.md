@@ -136,13 +136,13 @@ The Vinext build emits a non-blocking optimize-imports warning for the Ant Desig
 
 ## Paragraph and selection context — 2026-07-30
 
-- Hover now renders one bounding box around the complete source paragraph instead of separate line bands; the matching translated section uses a complete border as well.
+- Hover now renders one restrained band for each real source line. A paragraph remains one semantic translation unit, but its visual overlay no longer fills inter-line whitespace or bridges a neighboring column.
 - A source click locks the paragraph as AI Chat context and labels both sides `整段上下文`.
 - A native text selection takes precedence over the following click, replaces the paragraph context with the exact selected text, and labels the owning pair `选区上下文` / `选区所属译文`.
 - Selection context now persists its own merged line rectangles and all intersected paragraph IDs. The browser-native range is cleared after capture, preventing a paragraph-sized context box and native glyph selection from appearing at the same time.
 - The AI Chat context card explicitly distinguishes `整段` from `选区` and clears both the text and its locked paragraph mapping when removed.
-- Real browser evidence: `work/design-captures/implementation-context-paragraph-box.png`. The tested source box measured 283.3 × 77.0 px and its translated counterpart measured 394.0 × 94.6 px for the same `p1-s8` segment.
-- Mixed-layout regression: `LingBot_VA2_paper.pdf` page 1 is no longer forced through a midpoint-based two-column split. Its complete abstract maps to one `p1-s7` segment with 36 rendered text spans, from “The advent of video-action models” through “complex manipulation tasks.” The locked source box measured 499.9 × 197.7 px; evidence: `work/design-captures/implementation-lingbot-full-paragraph-box.png`.
+- Historical browser captures remain in `work/design-captures/`, but their paragraph-sized outlines have been superseded by the line-level overlay.
+- Mixed-layout regression: `LingBot_VA2_paper.pdf` page 1 remains one semantic abstract segment while displaying its source geometry as individual lines.
 
 ## iPad Safari PDF compatibility — 2026-07-30
 
@@ -166,16 +166,24 @@ The Vinext build emits a non-blocking optimize-imports warning for the Ant Desig
 ## Figure and pasted-image context — 2026-07-30
 
 - Captioned PDF figures expose a full-region hover target; clicking it renders a high-resolution page crop and appends it to AI Chat with its figure label and page number.
-- Figure detection now groups wrapped caption lines before choosing the bottom edge, so the crop keeps the complete caption without absorbing the following section heading.
+- Figure detection groups wrapped caption lines as metadata, but ends the visual frame and AI image crop above the caption. The figure, caption, and following paragraph remain distinct regions.
 - A second canvas-pixel pass scans upward from the caption, bridges small gaps inside the diagram, and stops at larger whitespace above it. This removes separated running headers and horizontal rules from the figure frame.
-- Live regression on `LingBot_VA2_paper.pdf`, page 3: Figure 1 was detected, clicked, and the generated AI attachment contained the complete architecture diagram plus all five caption lines, with no neighboring section text.
+- Existing live regression on `LingBot_VA2_paper.pdf`, page 3 confirmed the figure interaction. The final crop policy excludes its caption lines and retains the caption text only as context metadata.
 - The AI Chat composer accepts clipboard images through `Command-V`, shows removable thumbnail attachments, and keeps text, paragraph selection, paper figures, and pasted images as simultaneous context.
 - Image attachments are passed to the local Codex CLI through its real `--image` input. The loopback bridge validates PNG/JPEG/WebP payloads, caps each image at 10 MB and the request at four images/24 MB, writes only scoped temporary files, and removes them after the request.
 
-## Boundary page-turn scrolling — 2026-07-30
+## Text and figure overlay boundary correction — 2026-07-30
 
-- Normal wheel and trackpad movement scrolls only inside the current PDF page.
-- At the bottom edge, a deliberate continued downward scroll advances exactly one page and positions the next page at its top.
-- At the top edge, a deliberate continued upward scroll returns exactly one page and positions the previous page at its bottom.
-- Wheel input accumulates only inside a 420 ms gesture window. Touch input uses a separate iPad-sized distance threshold, and a 650 ms cooldown prevents momentum from skipping pages.
-- Live regression with `LingBot_VA2_paper.pdf`: an in-page scroll kept page 2 active; an additional boundary scroll changed page 2 to page 3 with `scrollTop: 0`; an upward boundary scroll returned to page 2 with `scrollTop: 333`, matching its measured maximum.
+- RoboTTT page 9 was replayed against the real PDF coordinates. “As shown in Table 2…” and the adjacent “Task Completion Score” table header now produce separate visual runs instead of one cross-column rectangle.
+- Translation synchronization uses per-line overlays with small padding. Only the first line owns the “对应译文” or context label; labels near the page top move below the line instead of being clipped.
+- RoboTTT page 11 Figure 12 was replayed against the real PDF. The detected image frame ends at normalized y `0.2536`; its caption starts at `0.2596`, so the caption and following prose are outside the interactive crop.
+- Figure styling uses a one-pixel border and lighter tint. Its hover label separates figure identity from the “加入 AI Chat” action and moves inside only when there is no safe space above.
+- Focused lint passed. All 21 Node regressions passed, and the production build completed successfully.
+
+## Continuous document scrolling — 2026-07-30
+
+- The center reader is one native vertical scroll surface. Page bottoms, the 18 px paper gap, and following page tops move through the viewport continuously without wheel/touch thresholds or cooldown locks.
+- Every page retains a correctly sized layout frame, while only the current page and two neighboring pages on each side mount PDF canvases and text layers.
+- The page nearest the viewport center becomes active, keeping the toolbar page number, thumbnail selection, translation, notes, and chat context synchronized while the document moves.
+- Thumbnail, toolbar, and translation-panel navigation scroll to the selected page. Nearby jumps animate unless the operating system requests reduced motion; distant jumps are immediate.
+- Focused geometry regressions cover active-page selection, empty-frame fallback, and the two-page render overscan. TypeScript, all 21 Node regressions, and the production build pass.
