@@ -31,10 +31,11 @@ import {
   ZoomOutOutlined,
 } from "@ant-design/icons";
 import katex from "katex";
-import { type ClipboardEvent as ReactClipboardEvent, type MouseEvent as ReactMouseEvent, type TouchEvent as ReactTouchEvent, type WheelEvent as ReactWheelEvent, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { type ClipboardEvent as ReactClipboardEvent, type MouseEvent as ReactMouseEvent, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { findClosestPageToViewportCenter, shouldRenderPage } from "./continuous-scroll";
 import { detectCaptionFigureRegions, refineFigureRegionsWithCanvas, type FigureRegion } from "./figure-regions";
 import { findGitHubRepository } from "./github-repository";
-import { accumulatePageTurnIntent, EMPTY_PAGE_TURN_INTENT, PAGE_TURN_COOLDOWN_MS, TOUCH_PAGE_TURN_THRESHOLD, WHEEL_PAGE_TURN_THRESHOLD, type PageTurnIntent } from "./page-turn-gesture";
+import { alignRenderedTextToSegments, mapPdfTextItemsToSegments, splitTextLineParts } from "./page-segment-geometry";
 import { mergeSelectionRects, type SelectionRect } from "./selection-geometry";
 
 type PdfTextItem = { str?: string; transform?: number[]; width?: number };
@@ -55,9 +56,24 @@ type RightTab = "translation" | "outline" | "terms" | "notes";
 type MobileView = "paper" | "translation";
 type AnnotationMode = "select" | "highlight" | "erase";
 type BridgeStatus = "checking" | "ready" | "offline";
+type AIProviderId = "local-codex" | "openai" | "mimo";
+type AIUsage = { inputTokens: number; outputTokens: number; totalTokens: number; cachedTokens: number; reasoningTokens: number };
+type ProviderInfo = {
+  id: AIProviderId;
+  label: string;
+  configured: boolean;
+  available: boolean;
+  busy?: boolean;
+  skillAvailable?: boolean;
+  allowedModels?: string[];
+  models?: { translation: string; chat: string };
+  reasoningEffort?: string;
+};
+type ProviderMap = Partial<Record<AIProviderId, ProviderInfo>>;
+type AISettings = { provider: AIProviderId; translationModel: string; chatModel: string; reasoningEffort: string };
 type HighlightRect = { id: string; groupId: string; x: number; y: number; width: number; height: number; text: string };
-type PendingSelection = { text: string; rects: SelectionRect[]; x: number; y: number };
-type ChatMessage = { id: string; role: "user" | "assistant"; text: string; imageLabels?: string[]; repositoryUsed?: boolean; repositoryName?: string };
+type PendingSelection = { pageNumber: number; text: string; rects: SelectionRect[]; x: number; y: number };
+type ChatMessage = { id: string; role: "user" | "assistant"; text: string; imageLabels?: string[]; repositoryUsed?: boolean; repositoryName?: string; providerLabel?: string; model?: string; usage?: AIUsage; latencyMs?: number; fallbackReason?: string };
 type ChatImageAttachment = { id: string; label: string; source: "paper" | "clipboard"; dataUrl: string; pageNumber?: number };
 type ChatContextKind = "paragraph" | "selection";
 type SyncRect = { x: number; y: number; width: number; height: number };
@@ -78,13 +94,30 @@ type LibraryPaper = {
 };
 type StoredPaper = LibraryPaper & { file: Blob };
 type LoadPdfOptions = { paperId?: string; skipPersist?: boolean; initialPage?: number };
-type PageScrollTarget = "top" | "bottom";
+type PageSize = { width: number; height: number };
 
-// Keep Codex loopback-only. The dev server proxies this same-origin path to the
+// Keep the AI bridge loopback-only. The dev server proxies this same-origin path to the
 // local bridge so an iPad can use PaperLens without exposing port 43123.
 const CODEX_BRIDGE = "/api/codex";
 const LIBRARY_DB = "paperlens-local-library";
 const LIBRARY_STORE = "papers";
+const AI_SETTINGS_KEY = "paperlens-ai-settings";
+const MAX_PDF_CANVAS_EDGE = 4096;
+const MAX_PDF_CANVAS_PIXELS = 16_000_000;
+const DEFAULT_AI_SETTINGS: AISettings = {
+  provider: "local-codex",
+  translationModel: "gpt-5.6-terra",
+  chatModel: "gpt-5.6-terra",
+  reasoningEffort: "low",
+};
+
+function getPdfOutputScale(width: number, height: number) {
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return 1;
+  const deviceScale = Math.max(1, window.devicePixelRatio || 1);
+  const edgeScale = Math.min(MAX_PDF_CANVAS_EDGE / width, MAX_PDF_CANVAS_EDGE / height);
+  const areaScale = Math.sqrt(MAX_PDF_CANVAS_PIXELS / (width * height));
+  return Math.max(1, Math.min(deviceScale, 2.5, edgeScale, areaScale));
+}
 
 function openLibraryDatabase() {
   return new Promise<IDBDatabase>((resolve, reject) => {
@@ -262,25 +295,13 @@ function buildPageSegments(items: PdfTextItem[], viewport: PdfViewport, pageNumb
   // chunks on the same baseline stay together as one line.
   const rawLines: Omit<Line, "heading" | "lane">[] = [];
   for (const bucket of lineBuckets) {
-    const parts = bucket.parts.sort((a, b) => a.x - b.x);
-    let run: Positioned[] = [];
-    const flushRun = () => {
-      if (!run.length) return;
+    for (const run of splitTextLineParts(bucket.parts, viewport.width)) {
       const x = Math.min(...run.map((item) => item.x));
       const right = Math.max(...run.map((item) => item.x + item.width));
       const height = Math.max(...run.map((item) => item.height));
       const text = run.map((item) => item.text).join(" ").replace(/\s+/g, " ").trim();
       if (text) rawLines.push({ text, x, y: bucket.y, width: right - x, height, right });
-      run = [];
-    };
-    for (const item of parts) {
-      const previous = run[run.length - 1];
-      const gap = previous ? item.x - (previous.x + previous.width) : 0;
-      const gutterThreshold = Math.max(viewport.width * .045, item.height * 2.8);
-      if (previous && gap > gutterThreshold) flushRun();
-      run.push(item);
     }
-    flushRun();
   }
   rawLines.sort((a, b) => b.y - a.y || a.x - b.x);
 
@@ -465,55 +486,417 @@ function ScientificText({ text }: { text: string }) {
   return <>{parts}</>;
 }
 
-function segmentBounds(segment: PageSegment): SyncRect {
+function paddedSyncRect(rect: SyncRect): SyncRect {
+  const paddingX = .0025;
+  const paddingY = .0015;
+  const x = Math.max(0, rect.x - paddingX);
+  const y = Math.max(0, rect.y - paddingY);
+  return {
+    x,
+    y,
+    width: Math.min(1 - x, rect.width + paddingX * 2),
+    height: Math.min(1 - y, rect.height + paddingY * 2),
+  };
+}
+
+function SegmentOverlay({ segment, label, tone }: { segment: PageSegment; label: string; tone: "preview" | "context" }) {
   const left = Math.min(...segment.rects.map((rect) => rect.x));
   const top = Math.min(...segment.rects.map((rect) => rect.y));
   const right = Math.max(...segment.rects.map((rect) => rect.x + rect.width));
   const bottom = Math.max(...segment.rects.map((rect) => rect.y + rect.height));
-  const paddingX = .006;
-  const paddingY = .005;
-  return {
-    x: Math.max(0, left - paddingX),
-    y: Math.max(0, top - paddingY),
-    width: Math.min(1 - Math.max(0, left - paddingX), right - left + paddingX * 2),
-    height: Math.min(1 - Math.max(0, top - paddingY), bottom - top + paddingY * 2),
-  };
+  const rect = paddedSyncRect({ x: left, y: top, width: right - left, height: bottom - top });
+  return (
+    <span
+      className={`sync-segment-box ${tone} ${rect.y < .03 ? "label-below" : ""}`}
+      style={{ left: `${rect.x * 100}%`, top: `${rect.y * 100}%`, width: `${rect.width * 100}%`, height: `${rect.height * 100}%` }}
+    >
+      <i>{label}</i>
+    </span>
+  );
 }
 
 function repositoryName(url: string) {
   return url.replace(/^https?:\/\/(?:www\.)?github\.com\//i, "").replace(/\/$/, "");
 }
 
-async function invokeCodex(payload: Record<string, unknown>) {
+async function invokeAI(payload: Record<string, unknown>, settings: AISettings, signal?: AbortSignal) {
   const response = await fetch(`${CODEX_BRIDGE}/invoke`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify(payload),
+    body: JSON.stringify({ ...payload, ...settings }),
+    signal,
   });
-  const result = await response.json() as { answer?: string; error?: string; repositoryUsed?: boolean; repositoryDecision?: string };
-  if (!response.ok || !result.answer) throw new Error(result.error || "Codex 调用失败");
+  const result = await response.json() as {
+    answer?: string;
+    error?: string;
+    code?: string;
+    repositoryUsed?: boolean;
+    repositoryDecision?: string;
+    provider?: AIProviderId;
+    model?: string;
+    usage?: AIUsage;
+    latencyMs?: number;
+    fallbackReason?: string;
+  };
+  if (!response.ok || !result.answer) throw new Error(result.error || "AI 服务调用失败");
   return {
     answer: result.answer,
     repositoryUsed: result.repositoryUsed,
     repositoryDecision: result.repositoryDecision,
+    provider: result.provider || settings.provider,
+    model: result.model,
+    usage: result.usage,
+    latencyMs: result.latencyMs,
+    fallbackReason: result.fallbackReason,
   };
+}
+
+function providerDisplayName(provider: AIProviderId, model?: string) {
+  if (provider === "openai") return `OpenAI${model ? ` · ${model}` : " API"}`;
+  if (provider === "mimo") return `MiMo${model ? ` · ${model}` : " API"}`;
+  return "本机 Codex";
+}
+
+function usageSummary(usage?: AIUsage) {
+  if (!usage) return "";
+  return `${usage.totalTokens.toLocaleString("zh-CN")} tokens（输入 ${usage.inputTokens.toLocaleString("zh-CN")} / 输出 ${usage.outputTokens.toLocaleString("zh-CN")}）`;
+}
+
+function AISettingsModal({
+  settings,
+  providers,
+  bridgeStatus,
+  skillAvailable,
+  testStatus,
+  onSettingsChange,
+  onClose,
+  onRefresh,
+  onTest,
+}: {
+  settings: AISettings;
+  providers: ProviderMap;
+  bridgeStatus: BridgeStatus;
+  skillAvailable: boolean;
+  testStatus: string;
+  onSettingsChange: (settings: AISettings) => void;
+  onClose: () => void;
+  onRefresh: () => void;
+  onTest: () => void;
+}) {
+  const selected = providers[settings.provider];
+  const status = bridgeStatus === "checking" ? "checking" : bridgeStatus === "offline" || !selected?.available ? "offline" : "ready";
+  const models = selected?.allowedModels?.length ? selected.allowedModels : settings.provider === "mimo" ? ["mimo-v2.5", "mimo-v2.5-pro"] : ["gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.6-sol"];
+  return (
+    <div className="modal-backdrop" onMouseDown={onClose}>
+      <section className="modal ai-settings-modal" role="dialog" aria-modal="true" aria-labelledby="ai-settings-title" onMouseDown={(event) => event.stopPropagation()}>
+        <button className="modal-close" onClick={onClose} aria-label="关闭"><CloseOutlined /></button>
+        <h2 id="ai-settings-title">AI 服务设置</h2>
+        <p>选择翻译和问答使用的服务。API Key 只从本机服务端环境变量读取，不会保存到浏览器。</p>
+        <div className="provider-options" role="radiogroup" aria-label="AI Provider">
+          {(["local-codex", "mimo", "openai"] as AIProviderId[]).map((providerId) => {
+            const info = providers[providerId];
+            const active = settings.provider === providerId;
+            return (
+              <button key={providerId} type="button" role="radio" aria-checked={active} className={`provider-option ${active ? "active" : ""}`} onClick={() => onSettingsChange({
+                ...settings,
+                provider: providerId,
+                ...(providerId === "mimo" ? { translationModel: "mimo-v2.5", chatModel: "mimo-v2.5" } : providerId === "openai" ? { translationModel: "gpt-5.6-terra", chatModel: "gpt-5.6-terra" } : {}),
+              })}>
+                <span><RobotOutlined /></span>
+                <div><strong>{providerId === "local-codex" ? "本机 Codex" : providerId === "mimo" ? "Xiaomi MiMo" : "OpenAI API"}</strong><small>{info?.available ? "可用" : providerId === "local-codex" ? "未检测到" : "未配置 API Key"}</small></div>
+                <i>{active ? <CheckOutlined /> : null}</i>
+              </button>
+            );
+          })}
+        </div>
+        {settings.provider !== "local-codex" && (
+          <div className="ai-model-settings">
+            <label>翻译模型<select value={settings.translationModel} onChange={(event) => onSettingsChange({ ...settings, translationModel: event.target.value })}>{models.map((model) => <option key={model} value={model}>{model}</option>)}</select></label>
+            <label>问答模型<select value={settings.chatModel} onChange={(event) => onSettingsChange({ ...settings, chatModel: event.target.value })}>{models.map((model) => <option key={model} value={model}>{model}</option>)}</select></label>
+            {settings.provider === "openai" && <label>推理强度<select value={settings.reasoningEffort} onChange={(event) => onSettingsChange({ ...settings, reasoningEffort: event.target.value })}><option value="none">无</option><option value="low">低</option><option value="medium">中</option><option value="high">高</option></select></label>}
+          </div>
+        )}
+        <div className={`codex-connection-card ${status}`}>
+          <RobotOutlined />
+          <div>
+            <strong>{status === "ready" ? `${selected?.label || "AI 服务"} 已就绪` : status === "checking" ? "正在检测…" : settings.provider === "openai" ? "OpenAI API 尚未配置" : settings.provider === "mimo" ? "MiMo API 尚未配置" : "本机 AI 桥接未启动"}</strong>
+            <span>{status === "ready" ? settings.provider === "local-codex" ? `Paper Reader Skill ${skillAvailable ? "已安装" : "未检测到"}` : `翻译 ${settings.translationModel} · 问答 ${settings.chatModel}` : settings.provider === "openai" ? "在服务端 .env 中设置 OPENAI_API_KEY 后重启" : settings.provider === "mimo" ? "在服务端 .env 中设置 MIMO_API_KEY 后重启" : "请用 npm run dev 启动网页和桥接"}</span>
+          </div>
+        </div>
+        {testStatus && <div className="provider-test-status" role="status">{testStatus}</div>}
+        <div className="modal-actions"><button className="plain-button" onClick={onClose}>关闭</button><button className="plain-button" onClick={onRefresh}>刷新状态</button><button className="primary-button" onClick={onTest}>测试当前服务</button></div>
+        <small>仓库实现问题会优先交给本机 Codex 做实时核实；论文文件继续只在浏览器本机解析。模型与 Provider 选择会保存在本机，但 API Key 永远不会进入浏览器存储。</small>
+      </section>
+    </div>
+  );
+}
+
+function PdfPageView({
+  pdf,
+  pageNumber,
+  displayWidth,
+  pageSize,
+  renderContent,
+  isActive,
+  segments,
+  highlights,
+  figures,
+  activeSegmentId,
+  contextSegmentId,
+  contextSegmentIds,
+  contextKind,
+  selectionContextRects,
+  pendingSelection,
+  annotationMode,
+  hoveredFigureId,
+  onRegisterFrame,
+  onPageSize,
+  onPageParsed,
+  onStatus,
+  onPaperSelection,
+  onSelectionStart,
+  onSourceHover,
+  onSourceLeave,
+  onSourceClick,
+  onRemoveHighlight,
+  onFigureHover,
+  onAddFigure,
+  onAskSelection,
+  onHighlightSelection,
+}: {
+  pdf: PdfDocument;
+  pageNumber: number;
+  displayWidth: number;
+  pageSize: PageSize;
+  renderContent: boolean;
+  isActive: boolean;
+  segments: PageSegment[];
+  highlights: HighlightRect[];
+  figures: FigureRegion[];
+  activeSegmentId: string;
+  contextSegmentId: string;
+  contextSegmentIds: string[];
+  contextKind: ChatContextKind | null;
+  selectionContextRects: SyncRect[];
+  pendingSelection: PendingSelection | null;
+  annotationMode: AnnotationMode;
+  hoveredFigureId: string;
+  onRegisterFrame: (pageNumber: number, frame: HTMLElement | null) => void;
+  onPageSize: (pageNumber: number, size: PageSize) => void;
+  onPageParsed: (pageNumber: number, result: { segments: PageSegment[]; figures: FigureRegion[]; text: string }) => void;
+  onStatus: (pageNumber: number, message: string) => void;
+  onPaperSelection: (pageNumber: number, event: ReactMouseEvent<HTMLElement>) => void;
+  onSelectionStart: () => void;
+  onSourceHover: (pageNumber: number, event: ReactMouseEvent<HTMLDivElement>) => void;
+  onSourceLeave: () => void;
+  onSourceClick: (pageNumber: number, event: ReactMouseEvent<HTMLDivElement>) => void;
+  onRemoveHighlight: (pageNumber: number, groupId: string) => void;
+  onFigureHover: (figureId: string) => void;
+  onAddFigure: (pageNumber: number, figure: FigureRegion) => void;
+  onAskSelection: () => void;
+  onHighlightSelection: (selection: PendingSelection) => void;
+}) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const textLayerRef = useRef<HTMLDivElement>(null);
+  const frameRef = useRef<HTMLElement>(null);
+  const pageRef = useRef<PdfPage | null>(null);
+  const contentRef = useRef<PdfTextContent | null>(null);
+  const renderSequenceRef = useRef(0);
+  const parsedRef = useRef(false);
+  const registerFrame = useCallback((frame: HTMLElement | null) => {
+    frameRef.current = frame;
+    onRegisterFrame(pageNumber, frame);
+  }, [onRegisterFrame, pageNumber]);
+
+  useEffect(() => {
+    parsedRef.current = false;
+    pageRef.current = null;
+    contentRef.current = null;
+  }, [pdf, pageNumber]);
+
+  useEffect(() => {
+    if (!renderContent) return;
+    const sequence = ++renderSequenceRef.current;
+    let cancelled = false;
+    let renderTask: PdfRenderTask | null = null;
+    let textLayerTask: { cancel?: () => void } | null = null;
+    let resizeObserver: ResizeObserver | null = null;
+
+    const render = async () => {
+      const page = pageRef.current || await pdf.getPage(pageNumber);
+      pageRef.current = page;
+      if (cancelled || sequence !== renderSequenceRef.current) return;
+
+      const baseViewport = page.getViewport({ scale: 1 });
+      const displayViewport = page.getViewport({ scale: 1.45 });
+      onPageSize(pageNumber, { width: displayViewport.width, height: displayViewport.height });
+      const logicalScale = displayWidth / baseViewport.width;
+      const logicalViewport = page.getViewport({ scale: logicalScale });
+      const outputScale = getPdfOutputScale(logicalViewport.width, logicalViewport.height);
+      const renderViewport = page.getViewport({ scale: logicalScale * outputScale });
+      const canvas = canvasRef.current;
+      const textLayer = textLayerRef.current;
+      const frame = frameRef.current;
+      if (!canvas || !textLayer || !frame || cancelled) return;
+
+      canvas.width = Math.max(1, Math.round(renderViewport.width));
+      canvas.height = Math.max(1, Math.round(renderViewport.height));
+      canvas.dataset.outputScale = outputScale.toFixed(3);
+
+      renderTask = page.render({ canvas, viewport: renderViewport, background: "#ffffff" });
+      await renderTask.promise;
+      if (cancelled || sequence !== renderSequenceRef.current) return;
+      onStatus(pageNumber, `第 ${pageNumber} 页已显示，正在解析文字…`);
+
+      let content = contentRef.current;
+      if (!content) {
+        try {
+          content = await page.getTextContent();
+          contentRef.current = content;
+        } catch (error) {
+          console.error("PDF text extraction failed", error);
+          onStatus(pageNumber, `第 ${pageNumber} 页已显示，但文字层无法提取`);
+          return;
+        }
+      }
+      if (cancelled || sequence !== renderSequenceRef.current) return;
+
+      const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
+      textLayer.replaceChildren();
+      textLayer.style.width = `${logicalViewport.width}px`;
+      textLayer.style.height = `${logicalViewport.height}px`;
+      textLayerTask = new pdfjs.TextLayer({ textContentSource: content as never, container: textLayer, viewport: logicalViewport as never });
+      await (textLayerTask as { render: () => Promise<void> }).render();
+      if (cancelled || sequence !== renderSequenceRef.current) return;
+      // PDF.js replaces the explicit dimensions with a CSS `round()` formula.
+      // Without its full viewer variable set that formula collapses the layer
+      // width to zero, so the visible text spans cannot receive pointer events.
+      textLayer.style.width = `${logicalViewport.width}px`;
+      textLayer.style.height = `${logicalViewport.height}px`;
+      const syncTextLayer = () => {
+        const displayScale = frame.clientWidth / logicalViewport.width;
+        textLayer.style.transform = `scale(${displayScale})`;
+      };
+      syncTextLayer();
+      resizeObserver = new ResizeObserver(syncTextLayer);
+      resizeObserver.observe(frame);
+
+      const nextSegments = buildPageSegments(content.items, baseViewport, pageNumber);
+      const textSpans = Array.from(textLayer.querySelectorAll<HTMLElement>("span"))
+        .filter((span) => !span.querySelector("span") && Boolean(span.textContent?.trim()));
+      const itemOwners = mapPdfTextItemsToSegments(content.items, nextSegments, baseViewport.width, baseViewport.height);
+      const segmentIds = alignRenderedTextToSegments(textSpans.map((span) => span.textContent || ""), itemOwners);
+      textSpans.forEach((span, index) => {
+        const segmentId = segmentIds[index];
+        if (segmentId) span.dataset.segmentId = segmentId;
+      });
+
+      if (!parsedRef.current) {
+        const nextFigures = refineFigureRegionsWithCanvas(detectCaptionFigureRegions(content.items, baseViewport, pageNumber), canvas);
+        const text = nextSegments.map((segment) => segment.text).join("\n\n").trim().slice(0, 28_000);
+        parsedRef.current = true;
+        onPageParsed(pageNumber, { segments: nextSegments, figures: nextFigures, text });
+        onStatus(pageNumber, nextFigures.length ? `第 ${pageNumber} 页已解析，检测到 ${nextFigures.length} 张可引用图` : `第 ${pageNumber} 页已解析，可选择文字提问`);
+      }
+    };
+
+    void render().catch((error: unknown) => {
+      if (cancelled || (error instanceof Error && error.name === "RenderingCancelledException")) return;
+      console.error(`PDF page ${pageNumber} render failed`, error);
+      onStatus(pageNumber, `第 ${pageNumber} 页渲染失败，请重试`);
+    });
+    return () => {
+      cancelled = true;
+      renderTask?.cancel();
+      textLayerTask?.cancel?.();
+      resizeObserver?.disconnect();
+    };
+  }, [displayWidth, onPageParsed, onPageSize, onStatus, pageNumber, pdf, renderContent]);
+
+  const activeSegment = segments.find((segment) => segment.id === activeSegmentId) || null;
+  const contextSegment = segments.find((segment) => segment.id === contextSegmentId) || null;
+
+  return (
+    <article
+      ref={registerFrame}
+      className={`paper-frame pdf-page ${isActive ? "active" : ""}`}
+      data-page-number={pageNumber}
+      aria-label={`论文第 ${pageNumber} 页`}
+      style={{ width: displayWidth, aspectRatio: `${pageSize.width}/${pageSize.height}` }}
+      onMouseUp={(event) => onPaperSelection(pageNumber, event)}
+    >
+      {renderContent ? (
+        <>
+          <canvas ref={canvasRef} className="pdf-canvas" />
+          <div className="sync-highlight-layer" aria-hidden="true">
+            {isActive && contextKind === "selection" && selectionContextRects.map((rect, index) => (
+              <span key={`${rect.x}-${rect.y}-${index}`} className={`sync-selection-line context ${index === 0 && rect.y < .03 ? "label-below" : ""}`} style={{ left: `${rect.x * 100}%`, top: `${rect.y * 100}%`, width: `${rect.width * 100}%`, height: `${rect.height * 100}%` }}>
+                {index === 0 && <i>选区上下文</i>}
+              </span>
+            ))}
+            {contextSegment && contextKind !== "selection" && activeSegment?.id !== contextSegment.id && <SegmentOverlay segment={contextSegment} label="整段上下文" tone="context" />}
+            {activeSegment && !(contextKind === "selection" && contextSegmentIds.includes(activeSegment.id)) && <SegmentOverlay segment={activeSegment} label={activeSegment.id === contextSegment?.id ? contextKind === "selection" ? "选区上下文" : "整段上下文" : "对应译文"} tone={activeSegment.id === contextSegment?.id ? "context" : "preview"} />}
+          </div>
+          <div className="highlight-layer" aria-label={`第 ${pageNumber} 页论文标亮`}>
+            {highlights.map((highlight) => (
+              <button
+                key={highlight.id}
+                title={annotationMode === "erase" ? "点击擦除标亮" : highlight.text}
+                className="highlight-mark"
+                style={{ left: `${highlight.x * 100}%`, top: `${highlight.y * 100}%`, width: `${highlight.width * 100}%`, height: `${highlight.height * 100}%` }}
+                onClick={() => onRemoveHighlight(pageNumber, highlight.groupId)}
+              />
+            ))}
+          </div>
+          <div
+            ref={textLayerRef}
+            className="pdf-text-layer"
+            onMouseDown={onSelectionStart}
+            onMouseMove={(event) => onSourceHover(pageNumber, event)}
+            onMouseLeave={onSourceLeave}
+            onClick={(event) => onSourceClick(pageNumber, event)}
+          />
+          <div className="figure-region-layer" aria-label={`第 ${pageNumber} 页论文图片区域`}>
+            {figures.map((figure) => (
+              <button
+                key={figure.id}
+                type="button"
+                className={`figure-region-target ${figure.rect.y < .035 ? "label-inside" : "label-above"} ${hoveredFigureId === figure.id ? "active" : ""}`}
+                style={{ left: `${figure.rect.x * 100}%`, top: `${figure.rect.y * 100}%`, width: `${figure.rect.width * 100}%`, height: `${figure.rect.height * 100}%` }}
+                aria-label={`将 ${figure.label} 加入 AI Chat`}
+                title={`${figure.label}：点击截取整图并加入 AI Chat`}
+                onMouseEnter={() => onFigureHover(figure.id)}
+                onMouseLeave={() => onFigureHover("")}
+                onClick={(event) => { event.stopPropagation(); onAddFigure(pageNumber, figure); }}
+              >
+                <span><b><PictureOutlined /> {figure.label}</b><em>加入 AI Chat</em></span>
+              </button>
+            ))}
+          </div>
+          {pendingSelection?.pageNumber === pageNumber && (
+            <div className="selection-bubble" style={{ left: pendingSelection.x, top: pendingSelection.y }}>
+              <button onClick={onAskSelection}><MessageOutlined /> 问 AI</button>
+              <button onClick={() => onHighlightSelection(pendingSelection)}><HighlightOutlined /> 标亮</button>
+            </div>
+          )}
+        </>
+      ) : <div className="pdf-page-placeholder"><span>第 {pageNumber} 页</span></div>}
+    </article>
+  );
 }
 
 export default function Home() {
   const isClient = useSyncExternalStore(() => () => undefined, () => true, () => false);
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const textLayerRef = useRef<HTMLDivElement>(null);
-  const paperFrameRef = useRef<HTMLDivElement>(null);
   const pdfStageRef = useRef<HTMLDivElement>(null);
+  const pageFrameRefs = useRef(new Map<number, HTMLElement>());
+  const pageNumberRef = useRef(1);
+  const scrollSyncFrameRef = useRef<number | null>(null);
+  const pendingInitialPageRef = useRef<number | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const chatInputRef = useRef<HTMLTextAreaElement>(null);
   const selectionMadeRef = useRef(false);
-  const renderSequenceRef = useRef(0);
-  const activeRenderTaskRef = useRef<PdfRenderTask | null>(null);
-  const pageTurnIntentRef = useRef<PageTurnIntent>({ ...EMPTY_PAGE_TURN_INTENT });
-  const pageTurnLockedUntilRef = useRef(0);
-  const touchScrollRef = useRef({ y: 0 });
-  const pendingPageScrollRef = useRef<{ page: number; target: PageScrollTarget } | null>(null);
+  const translationAbortRef = useRef<AbortController | null>(null);
+  const chatAbortRef = useRef<AbortController | null>(null);
   const [appView, setAppView] = useState<AppView>("space");
   const [libraryPapers, setLibraryPapers] = useState<LibraryPaper[]>([]);
   const [libraryLoading, setLibraryLoading] = useState(true);
@@ -522,7 +905,8 @@ export default function Home() {
   const [pdf, setPdf] = useState<PdfDocument | null>(null);
   const [fileName, setFileName] = useState("");
   const [pageNumber, setPageNumber] = useState(1);
-  const [pageSize, setPageSize] = useState({ width: 900, height: 1165 });
+  const [pageSize, setPageSize] = useState<PageSize>({ width: 900, height: 1165 });
+  const [pageSizes, setPageSizes] = useState<Record<number, PageSize>>({});
   const [zoom, setZoom] = useState(1);
   const [pageTexts, setPageTexts] = useState<Record<number, string>>({});
   const [pageSegments, setPageSegments] = useState<Record<number, PageSegment[]>>({});
@@ -545,6 +929,13 @@ export default function Home() {
   const [chatImages, setChatImages] = useState<ChatImageAttachment[]>([]);
   const [isChatting, setIsChatting] = useState(false);
   const [bridgeStatus, setBridgeStatus] = useState<BridgeStatus>("checking");
+  const [providers, setProviders] = useState<ProviderMap>({});
+  const [aiSettings, setAISettings] = useState<AISettings>(DEFAULT_AI_SETTINGS);
+  const [settingsLoaded, setSettingsLoaded] = useState(false);
+  const [providerTestStatus, setProviderTestStatus] = useState("");
+  const [lastTranslationUsage, setLastTranslationUsage] = useState<AIUsage | undefined>();
+  const [lastTranslationProvider, setLastTranslationProvider] = useState("");
+  const [lastTranslationPage, setLastTranslationPage] = useState(0);
   const [skillAvailable, setSkillAvailable] = useState(false);
   const [detectedRepositoryUrl, setDetectedRepositoryUrl] = useState("");
   const [stageAvailableWidth, setStageAvailableWidth] = useState(900);
@@ -559,13 +950,13 @@ export default function Home() {
   const currentSegments = useMemo(() => pageSegments[pageNumber] || [], [pageNumber, pageSegments]);
   const currentTranslatedSegments = useMemo(() => translations[pageNumber] || [], [pageNumber, translations]);
   const currentTranslation = currentTranslatedSegments.map((segment) => segment.translation).join("\n\n");
-  const currentHighlights = highlights[pageNumber] || [];
-  const currentFigures = pageFigures[pageNumber] || [];
   const activeSegmentId = hoveredSegmentId || contextSegmentId;
-  const activeSegment = currentSegments.find((segment) => segment.id === activeSegmentId) || null;
-  const contextSegment = currentSegments.find((segment) => segment.id === contextSegmentId) || null;
   const repositoryFromReadPages = useMemo(() => findGitHubRepository(Object.values(pageTexts).join("\n")), [pageTexts]);
   const repositoryUrl = detectedRepositoryUrl || repositoryFromReadPages;
+  const selectedProvider = providers[aiSettings.provider];
+  const selectedProviderAvailable = bridgeStatus === "ready" && Boolean(selectedProvider?.available);
+  const selectedProviderLabel = providerDisplayName(aiSettings.provider, aiSettings.provider !== "local-codex" ? aiSettings.chatModel : undefined);
+  const selectedStatus: BridgeStatus = bridgeStatus === "checking" ? "checking" : selectedProviderAvailable ? "ready" : "offline";
 
   const displayPageWidth = Math.max(240, Math.min(pageSize.width, stageAvailableWidth) * zoom);
 
@@ -574,11 +965,14 @@ export default function Home() {
     try {
       const response = await fetch(`${CODEX_BRIDGE}/health`, { cache: "no-store" });
       if (!response.ok) throw new Error("Bridge unavailable");
-      const health = await response.json() as { skillAvailable?: boolean };
-      setSkillAvailable(Boolean(health.skillAvailable));
+      const health = await response.json() as { providers?: ProviderMap };
+      const nextProviders = health.providers || {};
+      setProviders(nextProviders);
+      setSkillAvailable(Boolean(nextProviders["local-codex"]?.skillAvailable));
       setBridgeStatus("ready");
       return true;
     } catch {
+      setProviders({});
       setSkillAvailable(false);
       setBridgeStatus("offline");
       return false;
@@ -586,6 +980,50 @@ export default function Home() {
   }, []);
 
   useEffect(() => { void checkCodexBridge(); }, [checkCodexBridge]);
+
+  useEffect(() => {
+    try {
+      const stored = JSON.parse(localStorage.getItem(AI_SETTINGS_KEY) || "null") as Partial<AISettings> | null;
+      if (stored && (stored.provider === "local-codex" || stored.provider === "openai" || stored.provider === "mimo")) {
+        setAISettings({
+          provider: stored.provider,
+          translationModel: stored.translationModel || DEFAULT_AI_SETTINGS.translationModel,
+          chatModel: stored.chatModel || DEFAULT_AI_SETTINGS.chatModel,
+          reasoningEffort: ["none", "low", "medium", "high"].includes(stored.reasoningEffort || "") ? stored.reasoningEffort! : DEFAULT_AI_SETTINGS.reasoningEffort,
+        });
+      }
+    } catch {
+      localStorage.removeItem(AI_SETTINGS_KEY);
+    } finally {
+      setSettingsLoaded(true);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (settingsLoaded) localStorage.setItem(AI_SETTINGS_KEY, JSON.stringify(aiSettings));
+  }, [aiSettings, settingsLoaded]);
+
+  useEffect(() => () => {
+    translationAbortRef.current?.abort();
+    chatAbortRef.current?.abort();
+  }, []);
+
+  const testSelectedProvider = useCallback(async () => {
+    setProviderTestStatus("正在测试连接…");
+    try {
+      const response = await fetch(`${CODEX_BRIDGE}/test-provider`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ provider: aiSettings.provider }),
+      });
+      const result = await response.json() as { error?: string };
+      if (!response.ok) throw new Error(result.error || "连接测试失败");
+      setProviderTestStatus(`${providerDisplayName(aiSettings.provider)} 连接测试通过`);
+      await checkCodexBridge();
+    } catch (error) {
+      setProviderTestStatus(error instanceof Error ? error.message : "连接测试失败");
+    }
+  }, [aiSettings.provider, checkCodexBridge]);
 
   const refreshLibrary = useCallback(async () => {
     try {
@@ -650,122 +1088,50 @@ export default function Home() {
   }, [pdf]);
 
   useEffect(() => {
-    if (!pdf) return;
-    const sequence = ++renderSequenceRef.current;
-    let cancelled = false;
-    let renderTask: PdfRenderTask | null = null;
-    let textLayerTask: { cancel?: () => void } | null = null;
-    let resizeObserver: ResizeObserver | null = null;
-    const render = async () => {
-      // Safari takes longer to paint complex pages. Finish cancelling the old
-      // task before allowing PDF.js to reuse the same canvas for a new page.
-      const previousTask = activeRenderTaskRef.current;
-      if (previousTask) {
-        previousTask.cancel();
-        try { await previousTask.promise; } catch { /* expected cancellation */ }
-      }
-      if (cancelled || sequence !== renderSequenceRef.current) return;
+    pageNumberRef.current = pageNumber;
+    const knownSize = pageSizes[pageNumber];
+    if (knownSize) {
+      setPageSize((previous) => previous.width === knownSize.width && previous.height === knownSize.height ? previous : knownSize);
+    }
+  }, [pageNumber, pageSizes]);
 
-      const page = await pdf.getPage(pageNumber);
-      if (cancelled || sequence !== renderSequenceRef.current) return;
-      const viewport = page.getViewport({ scale: 1.45 * zoom });
-      const displayViewport = page.getViewport({ scale: 1.45 });
-      const baseViewport = page.getViewport({ scale: 1 });
-      const canvas = canvasRef.current;
-      const textLayer = textLayerRef.current;
-      const frame = paperFrameRef.current;
-      if (!canvas || !textLayer || !frame || cancelled) return;
-      canvas.width = viewport.width;
-      canvas.height = viewport.height;
-      setPageSize({ width: displayViewport.width, height: displayViewport.height });
-      const pendingScroll = pendingPageScrollRef.current;
-      if (pendingScroll?.page === pageNumber) {
-        requestAnimationFrame(() => requestAnimationFrame(() => {
-          const stage = pdfStageRef.current;
-          if (!stage || pendingPageScrollRef.current?.page !== pageNumber) return;
-          stage.scrollTop = pendingScroll.target === "top" ? 0 : Math.max(0, stage.scrollHeight - stage.clientHeight);
-          pendingPageScrollRef.current = null;
-        }));
-      }
+  const registerPageFrame = useCallback((targetPage: number, frame: HTMLElement | null) => {
+    if (frame) pageFrameRefs.current.set(targetPage, frame);
+    else pageFrameRefs.current.delete(targetPage);
+  }, []);
 
-      // Paint the paper first. Text extraction can be much slower on iPad for
-      // image-heavy PDFs and must never hold the visible page hostage.
-      renderTask = page.render({ canvas, viewport, background: "#ffffff" });
-      activeRenderTaskRef.current = renderTask;
-      await renderTask.promise;
-      if (activeRenderTaskRef.current === renderTask) activeRenderTaskRef.current = null;
-      if (cancelled) return;
-      setMessage(`第 ${pageNumber} 页已显示，正在解析文字…`);
-
-      let content: PdfTextContent;
-      try {
-        content = await page.getTextContent();
-      } catch (error) {
-        console.error("PDF text extraction failed", error);
-        if (!cancelled && sequence === renderSequenceRef.current) {
-          setMessage(`第 ${pageNumber} 页已显示，但文字层无法提取`);
-        }
-        return;
-      }
-      if (cancelled || sequence !== renderSequenceRef.current) return;
-
-      // The default PDF.js 6 build targets newer JavaScript runtimes and calls
-      // collection helpers such as Map#getOrInsertComputed. iPadOS Safari
-      // versions without those helpers fail before a page can render. The
-      // legacy build ships the required polyfills while keeping the same API.
-      const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
-      textLayer.replaceChildren();
-      textLayer.style.width = `${viewport.width}px`;
-      textLayer.style.height = `${viewport.height}px`;
-      textLayerTask = new pdfjs.TextLayer({ textContentSource: content, container: textLayer, viewport: viewport as never });
-      await (textLayerTask as { render: () => Promise<void> }).render();
-      textLayer.style.width = `${viewport.width}px`;
-      textLayer.style.height = `${viewport.height}px`;
-      const syncTextLayer = () => {
-        const displayScale = frame.clientWidth / viewport.width;
-        textLayer.style.transform = `scale(${displayScale})`;
-      };
-      syncTextLayer();
-      resizeObserver = new ResizeObserver(syncTextLayer);
-      resizeObserver.observe(frame);
-
-      const segments = buildPageSegments(content.items, baseViewport, pageNumber);
-      const figures = refineFigureRegionsWithCanvas(detectCaptionFigureRegions(content.items, baseViewport, pageNumber), canvas);
-      const text = segments.map((segment) => segment.text).join("\n\n").trim().slice(0, 28_000);
-      requestAnimationFrame(() => {
-        if (cancelled) return;
-        const bounds = textLayer.getBoundingClientRect();
-        if (!bounds.width || !bounds.height) return;
-        textLayer.querySelectorAll<HTMLElement>("span").forEach((span) => {
-          const rect = span.getBoundingClientRect();
-          const centerX = (rect.left + rect.width / 2 - bounds.left) / bounds.width;
-          const centerY = (rect.top + rect.height / 2 - bounds.top) / bounds.height;
-          const segment = segments.find((candidate) => candidate.rects.some((candidateRect) => (
-            centerX >= candidateRect.x - .012 && centerX <= candidateRect.x + candidateRect.width + .012 &&
-            centerY >= candidateRect.y - .008 && centerY <= candidateRect.y + candidateRect.height + .012
-          )));
-          if (segment) span.dataset.segmentId = segment.id;
-        });
-      });
-      if (!cancelled) {
-        setPageSegments((previous) => ({ ...previous, [pageNumber]: segments }));
-        setPageFigures((previous) => ({ ...previous, [pageNumber]: figures }));
-        setPageTexts((previous) => ({ ...previous, [pageNumber]: text }));
-        setMessage(figures.length ? `第 ${pageNumber} 页已解析，检测到 ${figures.length} 张可引用图` : `第 ${pageNumber} 页已解析，可选择文字提问`);
-      }
-    };
-    render().catch((error: unknown) => {
-      if (cancelled || (error instanceof Error && error.name === "RenderingCancelledException")) return;
-      console.error("PDF page render failed", error);
-      setMessage(`第 ${pageNumber} 页渲染失败，请重试`);
+  const handlePageSize = useCallback((targetPage: number, size: PageSize) => {
+    setPageSizes((previous) => {
+      const existing = previous[targetPage];
+      if (existing?.width === size.width && existing.height === size.height) return previous;
+      return { ...previous, [targetPage]: size };
     });
-    return () => {
-      cancelled = true;
-      renderTask?.cancel();
-      textLayerTask?.cancel?.();
-      resizeObserver?.disconnect();
-    };
-  }, [pageNumber, pdf, zoom]);
+    if (pageNumberRef.current === targetPage) {
+      setPageSize((previous) => previous.width === size.width && previous.height === size.height ? previous : size);
+    }
+  }, []);
+
+  const handlePageParsed = useCallback((targetPage: number, result: { segments: PageSegment[]; figures: FigureRegion[]; text: string }) => {
+    setPageSegments((previous) => ({ ...previous, [targetPage]: result.segments }));
+    setPageFigures((previous) => ({ ...previous, [targetPage]: result.figures }));
+    setPageTexts((previous) => ({ ...previous, [targetPage]: result.text }));
+  }, []);
+
+  const handlePageStatus = useCallback((targetPage: number, nextMessage: string) => {
+    if (pageNumberRef.current === targetPage) setMessage(nextMessage);
+  }, []);
+
+  useEffect(() => {
+    if (!pdf || appView !== "reader" || pendingInitialPageRef.current === null) return;
+    const targetPage = pendingInitialPageRef.current;
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      const stage = pdfStageRef.current;
+      const frame = pageFrameRefs.current.get(targetPage);
+      if (!stage || !frame || pendingInitialPageRef.current !== targetPage) return;
+      stage.scrollTop = Math.max(0, frame.offsetTop);
+      pendingInitialPageRef.current = null;
+    }));
+  }, [appView, displayPageWidth, pdf]);
 
   const loadFile = useCallback(async (file?: File, options: LoadPdfOptions = {}) => {
     if (!file) return;
@@ -787,7 +1153,9 @@ export default function Home() {
       setDetectedRepositoryUrl("");
       setCurrentPaperId(paperId);
       setFileName(file.name.replace(/\.pdf$/i, ""));
+      pageNumberRef.current = initialPage;
       setPageNumber(initialPage);
+      setPageSizes({});
       setPageTexts({});
       setPageSegments({});
       setTranslations({});
@@ -803,8 +1171,8 @@ export default function Home() {
       setSelectionContextRects([]);
       setPageFigures({});
       setHoveredFigureId("");
-      pageTurnIntentRef.current = { ...EMPTY_PAGE_TURN_INTENT };
-      pendingPageScrollRef.current = null;
+      pageFrameRefs.current.clear();
+      pendingInitialPageRef.current = initialPage;
       setRightTab("translation");
       setAppView("reader");
       setMessage(`已导入，共 ${nextPdf.numPages} 页`);
@@ -865,21 +1233,21 @@ export default function Home() {
   }, [currentPaperId, pageNumber, refreshLibrary]);
 
   const addHighlight = useCallback((selection: PendingSelection) => {
-    const groupId = `${pageNumber}-${Date.now()}`;
+    const groupId = `${selection.pageNumber}-${Date.now()}`;
     const next = selection.rects.map((rect, index) => ({ ...rect, id: `${groupId}-${index}`, groupId, text: selection.text }));
-    setHighlights((previous) => ({ ...previous, [pageNumber]: [...(previous[pageNumber] || []), ...next] }));
+    setHighlights((previous) => ({ ...previous, [selection.pageNumber]: [...(previous[selection.pageNumber] || []), ...next] }));
     setSelectedText(selection.text);
     setChatContextKind("selection");
     setPendingSelection(null);
     window.getSelection()?.removeAllRanges();
     setMessage(`已标亮 ${selection.text.length} 个字符`);
-  }, [pageNumber]);
+  }, []);
 
-  const handlePaperSelection = useCallback(() => {
+  const handlePaperSelection = useCallback((sourcePage: number, event: ReactMouseEvent<HTMLElement>) => {
     if (annotationMode === "erase") return;
     const selection = window.getSelection();
-    const frame = paperFrameRef.current;
-    const layer = textLayerRef.current;
+    const frame = event.currentTarget;
+    const layer = frame.querySelector<HTMLElement>(".pdf-text-layer");
     if (!selection || selection.isCollapsed || !selection.rangeCount || !frame || !layer) return;
     const anchor = selection.anchorNode;
     const focus = selection.focusNode;
@@ -898,6 +1266,7 @@ export default function Home() {
     })));
     const lastRect = rangeRects.at(-1)!;
     const nextSelection: PendingSelection = {
+      pageNumber: sourcePage,
       text,
       rects,
       x: Math.min(frameBounds.width - 160, Math.max(8, lastRect.right - frameBounds.left - 120)),
@@ -914,6 +1283,8 @@ export default function Home() {
       .filter((segmentId, index, values) => segmentId && values.indexOf(segmentId) === index);
     const primarySegmentId = anchorSegmentId || focusSegmentId || selectedSegmentIds[0] || "";
     selectionMadeRef.current = true;
+    pageNumberRef.current = sourcePage;
+    setPageNumber(sourcePage);
     setSelectedText(text);
     setChatContextKind("selection");
     setContextSegmentId(primarySegmentId);
@@ -925,47 +1296,62 @@ export default function Home() {
     selection.removeAllRanges();
   }, [addHighlight, annotationMode]);
 
-  const removeHighlight = (groupId: string) => {
+  const removeHighlight = useCallback((sourcePage: number, groupId: string) => {
     if (annotationMode !== "erase") return;
-    setHighlights((previous) => ({ ...previous, [pageNumber]: (previous[pageNumber] || []).filter((item) => item.groupId !== groupId) }));
+    setHighlights((previous) => ({ ...previous, [sourcePage]: (previous[sourcePage] || []).filter((item) => item.groupId !== groupId) }));
     setMessage("已擦除标亮");
-  };
+  }, [annotationMode]);
 
   const translateCurrent = async () => {
+    if (isTranslating) {
+      translationAbortRef.current?.abort();
+      setMessage("已停止当前翻译");
+      return;
+    }
     if (!currentText || !currentSegments.length) {
       setMessage("当前页文字仍在解析");
       return;
     }
-    if (bridgeStatus !== "ready") {
+    if (!selectedProviderAvailable) {
       setShowConnect(true);
       return;
     }
+    const controller = new AbortController();
+    translationAbortRef.current = controller;
     setIsTranslating(true);
     setRightTab("translation");
     setMobileView("translation");
-    setMessage("本机 Codex 正在翻译当前页…");
+    setMessage(`${providerDisplayName(aiSettings.provider, aiSettings.provider !== "local-codex" ? aiSettings.translationModel : undefined)} 正在翻译当前页…`);
     try {
-      const result = await invokeCodex({
+      const result = await invokeAI({
         mode: "translate",
         pageText: currentText,
         segments: currentSegments.map(({ id, text, kind }) => ({ id, text, kind })),
         paperTitle: fileName,
-      });
+      }, aiSettings, controller.signal);
       const translated = parseTranslatedSegments(result.answer, currentSegments);
       setTranslations((previous) => ({ ...previous, [pageNumber]: translated }));
-      setMessage("当前页翻译完成");
+      setLastTranslationUsage(result.usage);
+      setLastTranslationProvider(providerDisplayName(result.provider, result.model));
+      setLastTranslationPage(pageNumber);
+      setMessage(`当前页翻译完成 · ${providerDisplayName(result.provider, result.model)}${result.usage ? ` · ${usageSummary(result.usage)}` : ""}`);
     } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") {
+        setMessage("已停止当前翻译");
+        return;
+      }
       setMessage(error instanceof Error ? error.message : "翻译暂时不可用");
       const bridgeReady = await checkCodexBridge();
       if (!bridgeReady) setShowConnect(true);
     } finally {
+      if (translationAbortRef.current === controller) translationAbortRef.current = null;
       setIsTranslating(false);
     }
   };
 
-  const addFigureToChat = useCallback(async (figure: FigureRegion) => {
+  const addFigureToChat = useCallback(async (sourcePage: number, figure: FigureRegion) => {
     if (!pdf) return;
-    const attachmentId = `${currentPaperId || fileName}:p${pageNumber}:${figure.id}`;
+    const attachmentId = `${currentPaperId || fileName}:p${sourcePage}:${figure.id}`;
     if (chatImages.some((image) => image.id === attachmentId)) {
       setChatOpen(true);
       setMessage(`${figure.label} 已在 AI Chat 上下文中`);
@@ -978,7 +1364,7 @@ export default function Home() {
     }
     setMessage(`正在截取 ${figure.label}…`);
     try {
-      const page = await pdf.getPage(pageNumber);
+      const page = await pdf.getPage(sourcePage);
       const viewport = page.getViewport({ scale: 2.2 });
       const sourceCanvas = document.createElement("canvas");
       sourceCanvas.width = Math.max(1, Math.round(viewport.width));
@@ -999,8 +1385,8 @@ export default function Home() {
       cropContext.fillRect(0, 0, cropCanvas.width, cropCanvas.height);
       cropContext.drawImage(sourceCanvas, sourceX, sourceY, sourceWidth, sourceHeight, 0, 0, cropCanvas.width, cropCanvas.height);
       const dataUrl = cropCanvas.toDataURL("image/png");
-      const label = `${figure.label} · 第 ${pageNumber} 页`;
-      setChatImages((previous) => [...previous, { id: attachmentId, label, source: "paper", pageNumber, dataUrl }]);
+      const label = `${figure.label} · 第 ${sourcePage} 页`;
+      setChatImages((previous) => [...previous, { id: attachmentId, label, source: "paper", pageNumber: sourcePage, dataUrl }]);
       setChatOpen(true);
       setHoveredFigureId(figure.id);
       setMessage(`${figure.label} 已加入 AI Chat 图片上下文`);
@@ -1009,7 +1395,7 @@ export default function Home() {
       console.error("Figure capture failed", error);
       setMessage(error instanceof Error ? error.message : "论文图片截取失败");
     }
-  }, [chatImages, currentPaperId, fileName, pageNumber, pdf]);
+  }, [chatImages, currentPaperId, fileName, pdf]);
 
   const handleChatPaste = useCallback((event: ReactClipboardEvent<HTMLTextAreaElement>) => {
     const imageItem = Array.from(event.clipboardData.items).find((item) => item.kind === "file" && item.type.startsWith("image/"));
@@ -1040,13 +1426,19 @@ export default function Home() {
   }, [chatImages]);
 
   const sendChat = async (preset?: string) => {
+    if (isChatting) {
+      chatAbortRef.current?.abort();
+      return;
+    }
     const typedQuestion = (preset || chatInput).trim();
     const question = typedQuestion || (chatImages.length ? "请解释这些图片展示的结构、信息流，以及它们与当前页方法的关系。" : "");
     if (!question || isChatting) return;
-    if (bridgeStatus !== "ready") {
+    if (!selectedProviderAvailable) {
       setShowConnect(true);
       return;
     }
+    const controller = new AbortController();
+    chatAbortRef.current = controller;
     const userMessage: ChatMessage = { id: `user-${Date.now()}`, role: "user", text: question, imageLabels: chatImages.map((image) => image.label) };
     const history = chatMessages.map(({ role, text }) => ({ role, text }));
     setChatMessages((previous) => [...previous, userMessage]);
@@ -1054,7 +1446,7 @@ export default function Home() {
     setChatOpen(true);
     setIsChatting(true);
     try {
-      const result = await invokeCodex({
+      const result = await invokeAI({
         mode: repositoryUrl ? "auto" : "chat",
         question,
         pageText: currentText,
@@ -1063,17 +1455,25 @@ export default function Home() {
         repositoryUrl,
         history,
         images: chatImages.map(({ label, source, pageNumber: imagePageNumber, dataUrl }) => ({ label, source, pageNumber: imagePageNumber, dataUrl })),
-      });
+      }, aiSettings, controller.signal);
       setChatMessages((previous) => [...previous, {
         id: `assistant-${Date.now()}`,
         role: "assistant",
         text: result.answer,
         repositoryUsed: result.repositoryUsed,
         repositoryName: repositoryUrl ? repositoryName(repositoryUrl) : undefined,
+        providerLabel: providerDisplayName(result.provider, result.model),
+        model: result.model,
+        usage: result.usage,
+        latencyMs: result.latencyMs,
+        fallbackReason: result.fallbackReason,
       }]);
     } catch (error) {
-      setChatMessages((previous) => [...previous, { id: `assistant-error-${Date.now()}`, role: "assistant", text: `暂时没有得到可靠回答：${error instanceof Error ? error.message : "Codex 调用失败"}` }]);
+      if (!(error instanceof DOMException && error.name === "AbortError")) {
+        setChatMessages((previous) => [...previous, { id: `assistant-error-${Date.now()}`, role: "assistant", text: `暂时没有得到可靠回答：${error instanceof Error ? error.message : "AI 服务调用失败"}` }]);
+      }
     } finally {
+      if (chatAbortRef.current === controller) chatAbortRef.current = null;
       setIsChatting(false);
       requestAnimationFrame(() => chatInputRef.current?.focus());
     }
@@ -1093,12 +1493,16 @@ export default function Home() {
     }));
   }, []);
 
-  const activateSegment = useCallback((segmentId: string, origin: "source" | "translation") => {
+  const activateSegment = useCallback((segmentId: string, origin: "source" | "translation", sourcePage = pageNumberRef.current) => {
     if (!segmentId) return;
     setHoveredSegmentId(segmentId);
     if (origin === "source") {
+      if (pageNumberRef.current !== sourcePage) {
+        pageNumberRef.current = sourcePage;
+        setPageNumber(sourcePage);
+      }
       setRightTab("translation");
-      if (!currentTranslatedSegments.some((segment) => segment.id === segmentId)) return;
+      if (!(translations[sourcePage] || []).some((segment) => segment.id === segmentId)) return;
       requestAnimationFrame(() => {
         const container = document.querySelector<HTMLElement>(".translation-content");
         const target = document.querySelector<HTMLElement>(`[data-translation-segment="${segmentId}"]`);
@@ -1110,9 +1514,9 @@ export default function Home() {
       return;
     }
 
-    const segment = currentSegments.find((candidate) => candidate.id === segmentId);
+    const segment = (pageSegments[sourcePage] || []).find((candidate) => candidate.id === segmentId);
     const stage = pdfStageRef.current;
-    const frame = paperFrameRef.current;
+    const frame = pageFrameRefs.current.get(sourcePage);
     if (!segment || !stage || !frame || !segment.rects.length) return;
     const left = Math.min(...segment.rects.map((rect) => rect.x));
     const right = Math.max(...segment.rects.map((rect) => rect.x + rect.width));
@@ -1123,15 +1527,15 @@ export default function Home() {
       top: Math.max(0, frame.offsetTop + ((top + bottom) / 2) * frame.offsetHeight - stage.clientHeight / 2),
       behavior: "smooth",
     });
-  }, [currentSegments, currentTranslatedSegments]);
+  }, [pageSegments, translations]);
 
-  const handleSourceHover = useCallback((event: ReactMouseEvent<HTMLDivElement>) => {
+  const handleSourceHover = useCallback((sourcePage: number, event: ReactMouseEvent<HTMLDivElement>) => {
     const target = (event.target as HTMLElement).closest<HTMLElement>("[data-segment-id]");
     const segmentId = target?.dataset.segmentId || "";
-    if (segmentId && segmentId !== activeSegmentId) activateSegment(segmentId, "source");
+    if (segmentId && segmentId !== activeSegmentId) activateSegment(segmentId, "source", sourcePage);
   }, [activateSegment, activeSegmentId]);
 
-  const handleSourceClick = useCallback((event: ReactMouseEvent<HTMLDivElement>) => {
+  const handleSourceClick = useCallback((sourcePage: number, event: ReactMouseEvent<HTMLDivElement>) => {
     if (annotationMode !== "select") return;
     if (selectionMadeRef.current) {
       selectionMadeRef.current = false;
@@ -1141,17 +1545,19 @@ export default function Home() {
     if (selection && !selection.isCollapsed && selection.toString().trim()) return;
     const target = (event.target as HTMLElement).closest<HTMLElement>("[data-segment-id]");
     const segmentId = target?.dataset.segmentId || "";
-    const segment = currentSegments.find((candidate) => candidate.id === segmentId);
+    const segment = (pageSegments[sourcePage] || []).find((candidate) => candidate.id === segmentId);
     if (!segment) return;
+    pageNumberRef.current = sourcePage;
+    setPageNumber(sourcePage);
     setContextSegmentId(segment.id);
     setContextSegmentIds([segment.id]);
     setSelectionContextRects([]);
     setChatContextKind("paragraph");
     setSelectedText(segment.text.slice(0, 6_000));
     setPendingSelection(null);
-    activateSegment(segment.id, "source");
+    activateSegment(segment.id, "source", sourcePage);
     setMessage("整段已作为 AI Chat 上下文");
-  }, [activateSegment, annotationMode, currentSegments]);
+  }, [activateSegment, annotationMode, pageSegments]);
 
   const clearChatContext = useCallback(() => {
     setSelectedText("");
@@ -1163,13 +1569,11 @@ export default function Home() {
     window.getSelection()?.removeAllRanges();
   }, []);
 
-  const changePage = useCallback((next: number, scrollTarget: PageScrollTarget = "top") => {
+  const changePage = useCallback((next: number) => {
     if (!pdf) return;
     const boundedPage = Math.min(pdf.numPages, Math.max(1, next));
-    if (boundedPage === pageNumber) return;
-    pendingPageScrollRef.current = { page: boundedPage, target: scrollTarget };
-    pageTurnIntentRef.current = { ...EMPTY_PAGE_TURN_INTENT };
-    if (scrollTarget === "top" && pdfStageRef.current) pdfStageRef.current.scrollTop = 0;
+    const previousPage = pageNumberRef.current;
+    pageNumberRef.current = boundedPage;
     setPageNumber(boundedPage);
     setPendingSelection(null);
     setSelectedText("");
@@ -1178,50 +1582,42 @@ export default function Home() {
     setContextSegmentId("");
     setContextSegmentIds([]);
     setSelectionContextRects([]);
-  }, [pageNumber, pdf]);
+    requestAnimationFrame(() => {
+      const stage = pdfStageRef.current;
+      const frame = pageFrameRefs.current.get(boundedPage);
+      if (!stage || !frame) return;
+      const stageRect = stage.getBoundingClientRect();
+      const frameRect = frame.getBoundingClientRect();
+      const targetTop = Math.max(0, stage.scrollTop + frameRect.top - stageRect.top - 16);
+      const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+      const behavior: ScrollBehavior = !reduceMotion && Math.abs(boundedPage - previousPage) <= 2 ? "smooth" : "auto";
+      stage.scrollTo({ top: targetTop, behavior });
+    });
+  }, [pdf]);
 
-  const tryBoundaryPageTurn = useCallback((deltaY: number, stage: HTMLDivElement, timestamp: number, threshold: number) => {
-    if (!pdf || timestamp < pageTurnLockedUntilRef.current) return false;
-    const atStart = stage.scrollTop <= 2;
-    const atEnd = stage.scrollTop + stage.clientHeight >= stage.scrollHeight - 2;
-    const result = accumulatePageTurnIntent(pageTurnIntentRef.current, { deltaY, atStart, atEnd, timestamp, threshold });
-    pageTurnIntentRef.current = result.intent;
-    if (!result.turn) return false;
-    const nextPage = pageNumber + result.turn;
-    if (nextPage < 1 || nextPage > pdf.numPages) return false;
-    pageTurnLockedUntilRef.current = timestamp + PAGE_TURN_COOLDOWN_MS;
-    changePage(nextPage, result.turn === 1 ? "top" : "bottom");
-    return true;
-  }, [changePage, pageNumber, pdf]);
+  const handleStageScroll = useCallback(() => {
+    if (scrollSyncFrameRef.current !== null) return;
+    scrollSyncFrameRef.current = requestAnimationFrame(() => {
+      scrollSyncFrameRef.current = null;
+      const stage = pdfStageRef.current;
+      if (!stage || !pdf) return;
+      const frames = Array.from(pageFrameRefs.current, ([targetPage, frame]) => ({ pageNumber: targetPage, offsetTop: frame.offsetTop, height: frame.offsetHeight }));
+      const closestPage = findClosestPageToViewportCenter(stage.scrollTop, stage.clientHeight, frames, pageNumberRef.current);
+      if (closestPage === pageNumberRef.current) return;
+      pageNumberRef.current = closestPage;
+      setPageNumber(closestPage);
+      setPendingSelection(null);
+      setSelectedText("");
+      setChatContextKind(null);
+      setHoveredSegmentId("");
+      setContextSegmentId("");
+      setContextSegmentIds([]);
+      setSelectionContextRects([]);
+    });
+  }, [pdf]);
 
-  const handleStageWheel = useCallback((event: ReactWheelEvent<HTMLDivElement>) => {
-    if (Math.abs(event.deltaY) <= Math.abs(event.deltaX)) return;
-    const scale = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? event.currentTarget.clientHeight : 1;
-    if (tryBoundaryPageTurn(event.deltaY * scale, event.currentTarget, performance.now(), WHEEL_PAGE_TURN_THRESHOLD)) {
-      event.preventDefault();
-    }
-  }, [tryBoundaryPageTurn]);
-
-  const handleStageTouchStart = useCallback((event: ReactTouchEvent<HTMLDivElement>) => {
-    const touch = event.touches[0];
-    if (!touch) return;
-    touchScrollRef.current = { y: touch.clientY };
-    pageTurnIntentRef.current = { ...EMPTY_PAGE_TURN_INTENT };
-  }, []);
-
-  const handleStageTouchMove = useCallback((event: ReactTouchEvent<HTMLDivElement>) => {
-    const touch = event.touches[0];
-    if (!touch) return;
-    const timestamp = performance.now();
-    const deltaY = touchScrollRef.current.y - touch.clientY;
-    touchScrollRef.current = { y: touch.clientY };
-    if (tryBoundaryPageTurn(deltaY, event.currentTarget, timestamp, TOUCH_PAGE_TURN_THRESHOLD) && event.cancelable) {
-      event.preventDefault();
-    }
-  }, [tryBoundaryPageTurn]);
-
-  const resetPageTurnGesture = useCallback(() => {
-    pageTurnIntentRef.current = { ...EMPTY_PAGE_TURN_INTENT };
+  useEffect(() => () => {
+    if (scrollSyncFrameRef.current !== null) cancelAnimationFrame(scrollSyncFrameRef.current);
   }, []);
 
   useEffect(() => {
@@ -1240,6 +1636,20 @@ export default function Home() {
   });
 
   if (!isClient) return <main className="workspace-shell hydration-shell" aria-label="正在加载阅读器" />;
+
+  const settingsModal = showConnect ? (
+    <AISettingsModal
+      settings={aiSettings}
+      providers={providers}
+      bridgeStatus={bridgeStatus}
+      skillAvailable={skillAvailable}
+      testStatus={providerTestStatus}
+      onSettingsChange={(settings) => { setAISettings(settings); setProviderTestStatus(""); }}
+      onClose={() => setShowConnect(false)}
+      onRefresh={() => { setProviderTestStatus(""); void checkCodexBridge(); }}
+      onTest={() => void testSelectedProvider()}
+    />
+  ) : null;
 
   if (appView === "space") {
     return (
@@ -1272,9 +1682,9 @@ export default function Home() {
           </div>
           <nav aria-label="主导航"><span className="active"><HomeOutlined /> 我的空间</span></nav>
           <div className="library-header-actions">
-            <button className={`library-bridge ${bridgeStatus}`} onClick={() => setShowConnect(true)}>
+            <button className={`library-bridge ${selectedStatus}`} onClick={() => setShowConnect(true)}>
               <i />
-              {bridgeStatus === "ready" ? "Codex 已连接" : bridgeStatus === "checking" ? "正在检测 Codex" : "Codex 未连接"}
+              {selectedStatus === "ready" ? `${selectedProviderLabel} 已连接` : selectedStatus === "checking" ? "正在检测 AI 服务" : aiSettings.provider === "openai" ? "OpenAI API 未配置" : aiSettings.provider === "mimo" ? "MiMo API 未配置" : "Codex 未连接"}
             </button>
             <button className="library-import-button" onClick={() => fileInputRef.current?.click()}><PlusOutlined /> 导入 PDF</button>
           </div>
@@ -1346,20 +1756,7 @@ export default function Home() {
 
         <div className="library-drop-hint"><UploadOutlined /> 松开即可导入 PDF</div>
 
-        {showConnect && (
-          <div className="modal-backdrop" onMouseDown={() => setShowConnect(false)}>
-            <section className="modal" role="dialog" aria-modal="true" aria-labelledby="space-connect-title" onMouseDown={(event) => event.stopPropagation()}>
-              <button className="modal-close" onClick={() => setShowConnect(false)} aria-label="关闭"><CloseOutlined /></button>
-              <h2 id="space-connect-title">本机 Codex 连接</h2>
-              <p>PaperLens 的翻译和论文问答由本机 Codex 完成，论文文件仍只保存在这台设备。</p>
-              <div className={`codex-connection-card ${bridgeStatus}`}>
-                <RobotOutlined />
-                <div><strong>{bridgeStatus === "ready" ? "Codex 已连接" : bridgeStatus === "checking" ? "正在检测…" : "Codex 桥接未启动"}</strong><span>{bridgeStatus === "ready" ? "打开论文后即可翻译和提问" : "请保持 PaperLens 本地服务运行"}</span></div>
-              </div>
-              <div className="modal-actions"><button className="plain-button" onClick={() => setShowConnect(false)}>关闭</button><button className="primary-button" onClick={() => void checkCodexBridge()}>重新检测</button></div>
-            </section>
-          </div>
-        )}
+        {settingsModal}
       </main>
     );
   }
@@ -1402,7 +1799,7 @@ export default function Home() {
         <header className="document-header">
           <div className="breadcrumb"><button className="breadcrumb-home" onClick={goToWorkspace}><HomeOutlined /> 我的空间</button> <span>/</span> <strong>{fileName || "未导入文档"}</strong> <DownOutlined /></div>
           <div className="document-actions">
-            <button className={`bridge-pill ${bridgeStatus}`} onClick={() => setShowConnect(true)} title="本机 Codex 连接状态"><RobotOutlined /> {bridgeStatus === "ready" ? "Codex 已连接" : bridgeStatus === "checking" ? "检测 Codex" : "Codex 未连接"}</button>
+            <button className={`bridge-pill ${selectedStatus}`} onClick={() => setShowConnect(true)} title="AI 服务设置"><RobotOutlined /> {selectedStatus === "ready" ? selectedProviderLabel : selectedStatus === "checking" ? "检测 AI 服务" : aiSettings.provider === "local-codex" ? "Codex 未连接" : "API 未配置"}</button>
             <button onClick={() => fileInputRef.current?.click()}><UploadOutlined /> 更换 PDF</button>
           </div>
         </header>
@@ -1429,76 +1826,52 @@ export default function Home() {
         <div
           ref={pdfStageRef}
           className={`pdf-stage ${dragging ? "dragging" : ""} mode-${annotationMode}`}
-          onWheel={handleStageWheel}
-          onTouchStart={handleStageTouchStart}
-          onTouchMove={handleStageTouchMove}
-          onTouchEnd={resetPageTurnGesture}
-          onTouchCancel={resetPageTurnGesture}
+          onScroll={handleStageScroll}
           onDragOver={(event) => { event.preventDefault(); setDragging(true); }}
           onDragLeave={() => setDragging(false)}
           onDrop={(event) => { event.preventDefault(); setDragging(false); loadFile(event.dataTransfer.files?.[0]); }}
         >
           {pdf ? (
-            <div ref={paperFrameRef} className="paper-frame" style={{ width: displayPageWidth, aspectRatio: `${pageSize.width}/${pageSize.height}` }} onMouseUp={handlePaperSelection}>
-              <canvas ref={canvasRef} className="pdf-canvas" />
-              <div className="sync-highlight-layer" aria-hidden="true">
-                {chatContextKind === "selection" && selectionContextRects.map((rect, index) => (
-                  <span key={`${rect.x}-${rect.y}-${index}`} className="sync-selection-line context" style={{ left: `${rect.x * 100}%`, top: `${rect.y * 100}%`, width: `${rect.width * 100}%`, height: `${rect.height * 100}%` }}>
-                    {index === 0 && <i>选区上下文</i>}
-                  </span>
-                ))}
-                {chatContextKind !== "selection" && contextSegment && activeSegment?.id !== contextSegment.id && (() => {
-                  const bounds = segmentBounds(contextSegment);
-                  return <span className="sync-segment-box context" style={{ left: `${bounds.x * 100}%`, top: `${bounds.y * 100}%`, width: `${bounds.width * 100}%`, height: `${bounds.height * 100}%` }}><i>整段上下文</i></span>;
-                })()}
-                {activeSegment && !(chatContextKind === "selection" && contextSegmentIds.includes(activeSegment.id)) && (() => {
-                  const bounds = segmentBounds(activeSegment);
-                  const isContext = activeSegment.id === contextSegment?.id;
-                  return <span className={`sync-segment-box ${isContext ? "context" : "preview"}`} style={{ left: `${bounds.x * 100}%`, top: `${bounds.y * 100}%`, width: `${bounds.width * 100}%`, height: `${bounds.height * 100}%` }}><i>{isContext ? chatContextKind === "selection" ? "选区上下文" : "整段上下文" : "对应译文"}</i></span>;
-                })()}
-              </div>
-              <div className="highlight-layer" aria-label="论文标亮">
-                {currentHighlights.map((highlight) => (
-                  <button
-                    key={highlight.id}
-                    title={annotationMode === "erase" ? "点击擦除标亮" : highlight.text}
-                    className="highlight-mark"
-                    style={{ left: `${highlight.x * 100}%`, top: `${highlight.y * 100}%`, width: `${highlight.width * 100}%`, height: `${highlight.height * 100}%` }}
-                    onClick={() => removeHighlight(highlight.groupId)}
+            <div className="pdf-document-flow" aria-label="连续论文页面">
+              {Array.from({ length: pdf.numPages }, (_, index) => {
+                const targetPage = index + 1;
+                return (
+                  <PdfPageView
+                    key={targetPage}
+                    pdf={pdf}
+                    pageNumber={targetPage}
+                    displayWidth={displayPageWidth}
+                    pageSize={pageSizes[targetPage] || pageSize}
+                    renderContent={shouldRenderPage(targetPage, pageNumber)}
+                    isActive={targetPage === pageNumber}
+                    segments={pageSegments[targetPage] || []}
+                    highlights={highlights[targetPage] || []}
+                    figures={pageFigures[targetPage] || []}
+                    activeSegmentId={activeSegmentId}
+                    contextSegmentId={contextSegmentId}
+                    contextSegmentIds={contextSegmentIds}
+                    contextKind={chatContextKind}
+                    selectionContextRects={selectionContextRects}
+                    pendingSelection={pendingSelection}
+                    annotationMode={annotationMode}
+                    hoveredFigureId={hoveredFigureId}
+                    onRegisterFrame={registerPageFrame}
+                    onPageSize={handlePageSize}
+                    onPageParsed={handlePageParsed}
+                    onStatus={handlePageStatus}
+                    onPaperSelection={handlePaperSelection}
+                    onSelectionStart={() => { selectionMadeRef.current = false; }}
+                    onSourceHover={handleSourceHover}
+                    onSourceLeave={() => setHoveredSegmentId("")}
+                    onSourceClick={handleSourceClick}
+                    onRemoveHighlight={removeHighlight}
+                    onFigureHover={setHoveredFigureId}
+                    onAddFigure={(sourcePage, figure) => { void addFigureToChat(sourcePage, figure); }}
+                    onAskSelection={() => { setChatOpen(true); setPendingSelection(null); window.getSelection()?.removeAllRanges(); requestAnimationFrame(() => chatInputRef.current?.focus()); }}
+                    onHighlightSelection={addHighlight}
                   />
-                ))}
-              </div>
-              <div
-                ref={textLayerRef}
-                className="pdf-text-layer"
-                onMouseDown={() => { selectionMadeRef.current = false; }}
-                onMouseMove={handleSourceHover}
-                onMouseLeave={() => setHoveredSegmentId("")}
-                onClick={handleSourceClick}
-              />
-              <div className="figure-region-layer" aria-label="论文图片区域">
-                {currentFigures.map((figure) => (
-                  <button
-                    key={figure.id}
-                    type="button"
-                    className={`figure-region-target ${hoveredFigureId === figure.id ? "active" : ""}`}
-                    style={{ left: `${figure.rect.x * 100}%`, top: `${figure.rect.y * 100}%`, width: `${figure.rect.width * 100}%`, height: `${figure.rect.height * 100}%` }}
-                    aria-label={`将 ${figure.label} 加入 AI Chat`}
-                    title={`${figure.label}：点击截取整图并加入 AI Chat`}
-                    onMouseEnter={() => setHoveredFigureId(figure.id)}
-                    onMouseLeave={() => setHoveredFigureId("")}
-                    onClick={(event) => { event.stopPropagation(); void addFigureToChat(figure); }}
-                  >
-                    <span><PictureOutlined /> {figure.label} · 点击加入 AI Chat</span>
-                  </button>
-                ))}
-              </div>
-              {pendingSelection && (
-                <div className="selection-bubble" style={{ left: pendingSelection.x, top: pendingSelection.y }}>
-                  <button onClick={() => { setChatOpen(true); setPendingSelection(null); window.getSelection()?.removeAllRanges(); requestAnimationFrame(() => chatInputRef.current?.focus()); }}><MessageOutlined /> 问 Codex</button>
-                  <button onClick={() => addHighlight(pendingSelection)}><HighlightOutlined /> 标亮</button>
-                </div>
-              )}
+                );
+              })}
             </div>
           ) : (
             <button className="upload-empty" onClick={() => fileInputRef.current?.click()}>
@@ -1514,7 +1887,7 @@ export default function Home() {
           <div className="chat-drawer-header">
             <button className="chat-drawer-toggle" onClick={() => setChatOpen((value) => !value)} aria-expanded={chatOpen}>
               <span><RobotOutlined /> AI Chat</span>
-              <span className={`bridge-status ${bridgeStatus}`}><i /> {bridgeStatus === "ready" ? "本机 Codex" : "未连接"}</span>
+              <span className={`bridge-status ${selectedStatus}`}><i /> {selectedStatus === "ready" ? selectedProviderLabel : "未连接"}</span>
               {selectedText && <span className="collapsed-context">已引用：{selectedText.slice(0, 46)}</span>}
               {!!chatImages.length && <span className="collapsed-images"><PictureOutlined /> {chatImages.length} 张图片</span>}
               <DownOutlined className="drawer-arrow" />
@@ -1531,15 +1904,15 @@ export default function Home() {
                 {!chatMessages.length ? (
                   <div className="chat-empty">
                     <strong>针对当前页或选中内容提问</strong>
-                    <span>回答由本机 Codex 生成；检测到仓库时，代码问题会优先核实 GitHub / alphaXiv。</span>
+                    <span>回答由当前选择的 AI 服务生成；代码实现问题会回退到本机 Codex 核实仓库。</span>
                     <div>
                       <button onClick={() => void sendChat("用直觉解释选中的这段内容")}>直觉解释</button>
                       <button onClick={() => void sendChat("这段内容在整篇论文的方法里起什么作用？")}>方法位置</button>
                       <button onClick={() => void sendChat("这里最容易误解的点是什么？")}>避免误解</button>
                     </div>
                   </div>
-                ) : chatMessages.map((item) => <div key={item.id} className={`chat-message ${item.role}`}><span>{item.role === "assistant" ? <RobotOutlined /> : "你"}</span><div><p>{item.role === "assistant" ? <ScientificText text={item.text} /> : item.text}</p>{item.imageLabels?.length ? <small className="message-images"><PictureOutlined /> {item.imageLabels.join("、")}</small> : null}{item.role === "assistant" && item.repositoryUsed !== undefined ? <small className={`message-repository ${item.repositoryUsed ? "verified" : "skipped"}`}><GithubOutlined /> {item.repositoryUsed ? `已核实 ${item.repositoryName}` : "本次无需读取仓库"}</small> : null}</div></div>)}
-                {isChatting && <div className="chat-message assistant loading"><span><RobotOutlined /></span><p>{repositoryUrl ? "Codex 正在判断是否需要核实仓库…" : "Codex 正在阅读上下文并核实答案…"}</p></div>}
+                ) : chatMessages.map((item) => <div key={item.id} className={`chat-message ${item.role}`}><span>{item.role === "assistant" ? <RobotOutlined /> : "你"}</span><div><p>{item.role === "assistant" ? <ScientificText text={item.text} /> : item.text}</p>{item.imageLabels?.length ? <small className="message-images"><PictureOutlined /> {item.imageLabels.join("、")}</small> : null}{item.role === "assistant" && item.repositoryUsed !== undefined ? <small className={`message-repository ${item.repositoryUsed ? "verified" : "skipped"}`}><GithubOutlined /> {item.repositoryUsed ? `已核实 ${item.repositoryName}` : "本次无需读取仓库"}</small> : null}{item.role === "assistant" && (item.providerLabel || item.usage) ? <small className="message-provider">{item.fallbackReason ? `${item.fallbackReason} · ` : ""}{item.providerLabel}{item.usage ? ` · ${usageSummary(item.usage)}` : ""}{item.latencyMs ? ` · ${(item.latencyMs / 1000).toFixed(1)}s` : ""}</small> : null}</div></div>)}
+                {isChatting && <div className="chat-message assistant loading"><span><RobotOutlined /></span><p>{repositoryUrl ? `${selectedProviderLabel} 正在判断路由并阅读上下文…` : `${selectedProviderLabel} 正在阅读上下文…`}</p></div>}
               </div>
               <div className="chat-composer">
                 {!!chatImages.length && (
@@ -1557,7 +1930,7 @@ export default function Home() {
                 )}
                 <div className="chat-composer-row">
                   <textarea ref={chatInputRef} value={chatInput} onChange={(event) => setChatInput(event.target.value)} onPaste={handleChatPaste} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void sendChat(); } }} placeholder={chatImages.length ? "询问图片；也可以继续 Command-V 粘贴…" : repositoryUrl ? "问论文或代码实现；Codex 会按需核实仓库…" : "问当前页或选中内容；可 Command-V 粘贴图片…"} />
-                  <button disabled={(!chatInput.trim() && !chatImages.length) || isChatting} onClick={() => void sendChat()} aria-label="发送问题"><SendOutlined /></button>
+                  <button disabled={!isChatting && !chatInput.trim() && !chatImages.length} onClick={() => void sendChat()} aria-label={isChatting ? "停止生成" : "发送问题"}>{isChatting ? <CloseOutlined /> : <SendOutlined />}</button>
                 </div>
               </div>
             </div>
@@ -1578,9 +1951,9 @@ export default function Home() {
             <button title="下一页" disabled={!pdf || pageNumber >= (pdf?.numPages || 1)} onClick={() => changePage(pageNumber + 1)}><RightOutlined /></button>
           </div>
           <div>
-            <button title={currentTranslation ? "重新翻译（本机 Codex）" : "翻译当前页（本机 Codex）"} disabled={!currentText || isTranslating} onClick={translateCurrent}>{currentTranslation ? <ReloadOutlined /> : <TranslationOutlined />}</button>
+            <button title={isTranslating ? "停止翻译" : currentTranslation ? `重新翻译（${selectedProviderLabel}）` : `翻译当前页（${selectedProviderLabel}）`} disabled={!currentText} onClick={translateCurrent}>{isTranslating ? <CloseOutlined /> : currentTranslation ? <ReloadOutlined /> : <TranslationOutlined />}</button>
             <button title="复制译文" disabled={!currentTranslation} onClick={() => navigator.clipboard.writeText(currentTranslation)}><CopyOutlined /></button>
-            <button title="Codex 连接" onClick={() => setShowConnect(true)}><SettingOutlined /></button>
+            <button title="AI 服务设置" onClick={() => setShowConnect(true)}><SettingOutlined /></button>
             <button title="简体中文"><GlobalOutlined /></button>
           </div>
         </div>
@@ -1601,6 +1974,8 @@ export default function Home() {
               onDeactivate={() => setHoveredSegmentId("")}
               onTranslate={translateCurrent}
               onImport={() => fileInputRef.current?.click()}
+              providerLabel={lastTranslationPage === pageNumber && lastTranslationProvider ? lastTranslationProvider : selectedProviderLabel}
+              usage={lastTranslationPage === pageNumber ? lastTranslationUsage : undefined}
             />
           )}
           {rightTab === "outline" && <OutlineView text={currentTranslation || currentText} />}
@@ -1611,7 +1986,7 @@ export default function Home() {
         {!currentTranslation && (
           <div className="translation-footer">
             <span>{message}</span>
-            <button disabled={!currentText || isTranslating} onClick={translateCurrent}><TranslationOutlined /> {isTranslating ? "Codex 翻译中…" : "翻译本页"}</button>
+            <button disabled={!currentText} onClick={translateCurrent}>{isTranslating ? <CloseOutlined /> : <TranslationOutlined />} {isTranslating ? "停止翻译" : "翻译本页"}</button>
           </div>
         )}
       </aside>
@@ -1621,21 +1996,7 @@ export default function Home() {
         <button className={mobileView === "translation" ? "active" : ""} onClick={() => setMobileView("translation")}><TranslationOutlined /> 翻译</button>
       </div>
 
-      {showConnect && (
-        <div className="modal-backdrop" onMouseDown={() => setShowConnect(false)}>
-          <section className="modal" role="dialog" aria-modal="true" aria-labelledby="connect-title" onMouseDown={(event) => event.stopPropagation()}>
-            <button className="modal-close" onClick={() => setShowConnect(false)} aria-label="关闭"><CloseOutlined /></button>
-            <h2 id="connect-title">本机 Codex 连接</h2>
-            <p>PaperLens 不使用单独的 OpenAI API Key。翻译和问答都通过本机桥接调用你已登录的 Codex，并共享 Paper Reader Skill；代码问题可继续使用 Codex 里的 GitHub、alphaXiv 和网页检索。</p>
-            <div className={`codex-connection-card ${bridgeStatus}`}>
-              <RobotOutlined />
-              <div><strong>{bridgeStatus === "ready" ? "Codex 已连接" : bridgeStatus === "checking" ? "正在检测…" : "Codex 桥接未启动"}</strong><span>{bridgeStatus === "ready" ? `使用当前 ChatGPT 登录 · Paper Reader Skill ${skillAvailable ? "已安装" : "未检测到"}` : "请用 npm run dev 同时启动网页和本机桥接"}</span></div>
-            </div>
-            <div className="modal-actions"><button className="plain-button" onClick={() => setShowConnect(false)}>关闭</button><button className="primary-button" onClick={() => void checkCodexBridge()}>重新检测</button></div>
-            <small>本机桥接只监听 127.0.0.1，并以只读沙盒运行 Codex；论文文件仍只在浏览器本机解析。</small>
-          </section>
-        </div>
-      )}
+      {settingsModal}
 
     </main>
   );
@@ -1648,12 +2009,15 @@ function Thumbnail({ pdf, pageNumber, active, onSelect }: { pdf: PdfDocument; pa
     let renderTask: PdfRenderTask | null = null;
     const draw = async () => {
       const page = await pdf.getPage(pageNumber);
-      const viewport = page.getViewport({ scale: .22 });
+      const logicalViewport = page.getViewport({ scale: .22 });
+      const outputScale = getPdfOutputScale(logicalViewport.width, logicalViewport.height);
+      const renderViewport = page.getViewport({ scale: .22 * outputScale });
       const canvas = canvasRef.current;
       if (!canvas || cancelled) return;
-      canvas.width = viewport.width;
-      canvas.height = viewport.height;
-      renderTask = page.render({ canvas, viewport, background: "#ffffff" });
+      canvas.width = Math.max(1, Math.round(renderViewport.width));
+      canvas.height = Math.max(1, Math.round(renderViewport.height));
+      canvas.dataset.outputScale = outputScale.toFixed(3);
+      renderTask = page.render({ canvas, viewport: renderViewport, background: "#ffffff" });
       await renderTask.promise;
     };
     void draw().catch((error: unknown) => {
@@ -1672,7 +2036,7 @@ function Thumbnail({ pdf, pageNumber, active, onSelect }: { pdf: PdfDocument; pa
   );
 }
 
-function TranslationView({ pageNumber, sourceSegments, translatedSegments, loading, hasPdf, activeSegmentId, contextSegmentId, contextSegmentIds, contextKind, onActivate, onDeactivate, onTranslate, onImport }: {
+function TranslationView({ pageNumber, sourceSegments, translatedSegments, loading, hasPdf, activeSegmentId, contextSegmentId, contextSegmentIds, contextKind, onActivate, onDeactivate, onTranslate, onImport, providerLabel, usage }: {
   pageNumber: number;
   sourceSegments: PageSegment[];
   translatedSegments: TranslatedSegment[];
@@ -1686,6 +2050,8 @@ function TranslationView({ pageNumber, sourceSegments, translatedSegments, loadi
   onDeactivate: () => void;
   onTranslate: () => void;
   onImport: () => void;
+  providerLabel: string;
+  usage?: AIUsage;
 }) {
   if (!hasPdf) {
     return <div className="right-empty"><FilePdfOutlined /><strong>先导入一篇论文</strong><span>右侧会显示当前页的完整中文翻译</span><button onClick={onImport}>导入 PDF</button></div>;
@@ -1694,12 +2060,12 @@ function TranslationView({ pageNumber, sourceSegments, translatedSegments, loadi
     return <div className="translation-loading"><span /><span /><span /><span /><span /></div>;
   }
   if (!translatedSegments.length) {
-    return <div className="right-empty"><TranslationOutlined /><strong>第 {pageNumber} 页尚未翻译</strong><span>由本机 Codex 保留公式、引用和专业术语</span><button onClick={onTranslate}>翻译本页</button></div>;
+    return <div className="right-empty"><TranslationOutlined /><strong>第 {pageNumber} 页尚未翻译</strong><span>由 {providerLabel} 保留公式、引用和专业术语</span><button onClick={onTranslate}>翻译本页</button></div>;
   }
   const sourceById = new Map(sourceSegments.map((segment) => [segment.id, segment]));
   return (
     <article className="translated-article">
-      <div className="article-kicker">第 {pageNumber} 页 · Codex 中文译文 · 段落同步已开启</div>
+      <div className="article-kicker">第 {pageNumber} 页 · {providerLabel} 中文译文 · 段落同步已开启{usage ? ` · ${usageSummary(usage)}` : ""}</div>
       {translatedSegments.map((segment) => {
         const source = sourceById.get(segment.id);
         const heading = source?.kind === "heading";
