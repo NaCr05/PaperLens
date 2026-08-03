@@ -16,7 +16,7 @@ export function normalizeProviderError(error, provider = "unknown") {
   const rawCode = String(error?.code || error?.error?.code || "").toLowerCase();
   const rawMessage = error instanceof Error ? error.message : String(error || "");
   const message = rawMessage.toLowerCase();
-  const serviceName = provider === "mimo" ? "MiMo API" : provider === "openai" ? "OpenAI API" : "AI 服务";
+  const serviceName = provider === "mimo" ? "MiMo API" : provider === "openai" ? "OpenAI API" : provider === "cloudbase-hunyuan" ? "CloudBase Hy3" : "AI 服务";
 
   if (error?.name === "AbortError" || message.includes("aborted")) {
     return new ProviderError("请求已取消", { code: "request_aborted", status: 499, provider, cause: error });
@@ -32,6 +32,12 @@ export function normalizeProviderError(error, provider = "unknown") {
   }
   if (status === 429) {
     return new ProviderError(`${serviceName} 请求过于频繁，请稍后重试`, { code: "rate_limited", status: 429, retryable: true, provider, cause: error });
+  }
+  if (rawCode.includes("concurrent") || message.includes("concurrent request limit")) {
+    return new ProviderError(`${serviceName} 请求过于频繁，请稍后重试`, { code: "rate_limited", status: 429, retryable: true, provider, cause: error });
+  }
+  if (rawCode.includes("quota") || message.includes("resource package") || message.includes("额度") || message.includes("套餐")) {
+    return new ProviderError(`${serviceName} 额度暂不可用`, { code: "quota_exceeded", status: 429, provider, cause: error });
   }
   if (status >= 500 || error?.name === "APIConnectionError") {
     return new ProviderError(`${serviceName} 暂时不可用，请稍后重试`, { code: "upstream_unavailable", status: 502, retryable: true, provider, cause: error });

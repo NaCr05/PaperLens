@@ -29,6 +29,30 @@ test("counts only compatible pages and keeps stale cache out of full translation
   assert.deepEqual(pages, [7, 10]);
 });
 
+test("invalidates flattened text translations when source geometry is a table", () => {
+  const source = [0, 1, 2, 3].flatMap((row) => [0, 1, 2, 3].map((column) => ({
+    id: `p8-v2-s${row * 4 + column + 1}`,
+    text: `cell-${row}-${column}`,
+    kind: "paragraph",
+    rects: [{ x: .08 + column * .2, y: .2 + row * .1, width: .12, height: .02 }],
+  })));
+  const flattened = source.map((segment) => ({ id: segment.id, translation: `译文 ${segment.text}` }));
+  assert.equal(isPageTranslationCompatible(8, flattened, source), false);
+  assert.equal(isPageTranslationCompatible(8, [{ id: "p8-visual", translation: "| 表头 |\n| --- |" }], source), true);
+});
+
+test("requires exact segment coverage when live source segments are available", () => {
+  const source = [
+    { id: "p5-v2-s1", text: "One", kind: "paragraph", rects: [{ x: .1, y: .2, width: .5, height: .02 }] },
+    { id: "p5-v2-s2", text: "Two", kind: "paragraph", rects: [{ x: .1, y: .3, width: .5, height: .02 }] },
+  ];
+  assert.equal(isPageTranslationCompatible(5, [
+    { id: "p5-v2-s1", translation: "一" },
+    { id: "p5-v2-s2", translation: "二" },
+  ], source), true);
+  assert.equal(isPageTranslationCompatible(5, [{ id: "p5-v2-s1", translation: "一" }], source), false);
+});
+
 test("keeps inline-heading paragraphs separate and excludes text embedded in a figure", () => {
   const items = [
     item("3.1. Model Architecture", 60, 500, 190, "heading", 14),

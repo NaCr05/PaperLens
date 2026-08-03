@@ -27,6 +27,26 @@ test("routes numbered tables with several result cells through visual translatio
   assert.equal(shouldUseVisualPageTranslation(segments), true);
 });
 
+test("routes an uncaptioned slide table through full-page visual translation", () => {
+  const columns = [.07, .18, .34, .52, .72];
+  const rows = [.24, .34, .44, .54];
+  const segments = rows.flatMap((y, row) => columns.map((x, column) => ({
+    text: row === 0
+      ? ["Round #", "Open/close dates", "Round is open to", "Submit requests for", "Deadline"][column]
+      : `row-${row}-column-${column}`,
+    rects: [{ x, y, width: column === 2 ? .16 : .1, height: .022 }],
+  })));
+  assert.equal(shouldUseVisualPageTranslation(segments), true);
+});
+
+test("does not mistake ordinary two-column prose for a table", () => {
+  const segments = Array.from({ length: 8 }, (_, row) => [
+    { text: `Left-column paragraph ${row}`, rects: [{ x: .08, y: .14 + row * .08, width: .36, height: .02 }] },
+    { text: `Right-column paragraph ${row}`, rects: [{ x: .55, y: .14 + row * .08, width: .36, height: .02 }] },
+  ]).flat();
+  assert.equal(shouldUseVisualPageTranslation(segments), false);
+});
+
 test("keeps ordinary prose and table mentions on text-layer translation", () => {
   assert.equal(shouldUseVisualPageTranslation([
     { text: "We compare our results with Table 1 and discuss the main trend." },

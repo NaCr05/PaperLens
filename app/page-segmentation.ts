@@ -1,5 +1,6 @@
 import type { FigureRegion } from "./figure-regions";
 import { splitTextLineParts } from "./page-segment-geometry.ts";
+import { isVisualPageSegments, shouldUseVisualPageTranslation } from "./visual-page-translation.ts";
 
 export type PdfTextItem = {
   str?: string;
@@ -46,10 +47,20 @@ export const SEGMENTATION_VERSION = 2;
 export function isPageTranslationCompatible(
   pageNumber: number,
   translatedSegments: readonly StoredTranslationSegment[],
+  sourceSegments?: readonly PageSegment[],
 ) {
   if (!translatedSegments.length || translatedSegments.some((segment) => !segment.translation?.trim())) return false;
   const visualId = `p${pageNumber}-visual`;
   const visualTranslation = translatedSegments.length === 1 && translatedSegments[0].id === visualId;
+  if (sourceSegments?.length) {
+    const sourceRequiresVisual = isVisualPageSegments(sourceSegments)
+      || shouldUseVisualPageTranslation(sourceSegments);
+    if (sourceRequiresVisual) return visualTranslation;
+    if (visualTranslation) return false;
+    if (sourceSegments.length !== translatedSegments.length) return false;
+    const translatedIds = new Set(translatedSegments.map((segment) => segment.id));
+    return sourceSegments.every((segment) => translatedIds.has(segment.id));
+  }
   if (visualTranslation) return true;
 
   const prefix = `p${pageNumber}-v${SEGMENTATION_VERSION}-s`;
@@ -63,9 +74,12 @@ export function isPageTranslationCompatible(
   return validVersionedSequence;
 }
 
-export function compatibleTranslationPages(translations: Record<number, readonly StoredTranslationSegment[]>) {
+export function compatibleTranslationPages(
+  translations: Record<number, readonly StoredTranslationSegment[]>,
+  sourceSegmentsByPage?: Record<number, readonly PageSegment[]>,
+) {
   return Object.entries(translations)
-    .filter(([page, segments]) => isPageTranslationCompatible(Number(page), segments))
+    .filter(([page, segments]) => isPageTranslationCompatible(Number(page), segments, sourceSegmentsByPage?.[Number(page)]))
     .map(([page]) => Number(page));
 }
 

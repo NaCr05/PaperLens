@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { requiresRepositoryVerification, resolveProviderRoute } from "../bridge/provider-routing.mjs";
+import { requiresRepositoryVerification, resolveProviderRoute, shouldFallbackToMiMo } from "../bridge/provider-routing.mjs";
 
 test("routes ordinary auto questions through the selected API provider", () => {
   const route = resolveProviderRoute({ mode: "auto", question: "这段方法的直觉是什么？" }, "mimo", { "local-codex": true, mimo: true });
@@ -22,4 +22,11 @@ test("reports a capability error when repository verification has no local provi
   const route = resolveProviderRoute({ mode: "repository", question: "核对实现" }, "openai", { "local-codex": false, openai: true });
   assert.equal(route.provider, "openai");
   assert.match(route.unsupportedReason, /本机 Codex 当前不可用/);
+});
+
+test("falls back from CloudBase Hy3 to MiMo without retrying explicit cancellations", () => {
+  assert.equal(shouldFallbackToMiMo("cloudbase-hunyuan", "quota_exceeded", { mimo: true }), true);
+  assert.equal(shouldFallbackToMiMo("cloudbase-hunyuan", "request_aborted", { mimo: true }), false);
+  assert.equal(shouldFallbackToMiMo("mimo", "upstream_unavailable", { mimo: true }), false);
+  assert.equal(shouldFallbackToMiMo("cloudbase-hunyuan", "upstream_unavailable", { mimo: false }), false);
 });

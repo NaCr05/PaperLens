@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import test from "node:test";
 
+import { createCloudBaseHunyuanProvider } from "../bridge/providers/cloudbase-hunyuan.mjs";
 import { createMiMoProvider } from "../bridge/providers/mimo.mjs";
 import { createOpenAIProvider } from "../bridge/providers/openai.mjs";
 
@@ -85,6 +86,44 @@ test("MiMo adapter uses Chat Completions JSON mode and base64 image content", as
     assert.equal(received.messages[1].content[0].type, "image_url");
     assert.match(received.messages[1].content[0].image_url.url, /^data:image\/jpeg;base64,/);
   });
+});
+
+test("CloudBase Hy3 adapter uses the server SDK, normalizes usage, and rejects visual pages", async () => {
+  let initConfig;
+  let received;
+  const provider = createCloudBaseHunyuanProvider({
+    envId: "env-test",
+    accessKey: "test-key",
+    appFactory: (config) => {
+      initConfig = config;
+      return {
+        ai: () => ({
+          createModel: (group) => {
+            assert.equal(group, "hunyuan-v3");
+            return {
+              generateText: async (body) => {
+                received = body;
+                return {
+                  text: '{"segments":[{"id":"s1","translation":"译文","formulaExplanation":""}]}',
+                  usage: { prompt_tokens: 20, completion_tokens: 8, total_tokens: 28 },
+                };
+              },
+            };
+          },
+        }),
+      };
+    },
+  });
+  const result = await provider.invoke({ mode: "translate", images: [] }, { prompt: "translate", model: "hy3" });
+  assert.deepEqual(initConfig, { env: "env-test", accessKey: "test-key", timeout: 180_000 });
+  assert.equal(received.model, "hy3");
+  assert.equal(received.messages[1].content, "translate");
+  assert.equal(result.provider, "cloudbase-hunyuan");
+  assert.deepEqual(result.usage, { inputTokens: 20, outputTokens: 8, totalTokens: 28, cachedTokens: 0, reasoningTokens: 0 });
+  await assert.rejects(
+    provider.invoke({ mode: "translate", images: [{ dataUrl: "data:image/png;base64,aGVsbG8=" }] }, { prompt: "translate", model: "hy3" }),
+    (error) => error.code === "capability_unavailable",
+  );
 });
 
 test("term extraction uses structured JSON output on both API providers", async () => {

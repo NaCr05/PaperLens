@@ -131,8 +131,8 @@ test("keeps local learning-material reading, direct Codex calls, scrolling, zoom
   assert.match(page, /第 \$\{sourcePage\} 页没有文字层，正在生成整页图片/);
   assert.match(page, /翻译全文/);
   assert.match(page, /compatibleTranslationPages\(restoredTranslations\)/);
-  assert.match(page, /const completed = compatibleTranslationPages\(translations\)\.length/);
-  assert.match(page, /isPageTranslationCompatible\(pageNumber, translatedSegments\)/);
+  assert.match(page, /const completed = compatibleTranslationPages\(translations, pageSegments\)\.length/);
+  assert.match(page, /isPageTranslationCompatible\(pageNumber, translatedSegments, sourceSegments\)/);
   assert.match(page, /译文需要更新/);
   assert.match(page, /自动重新加入全文翻译队列/);
   assert.match(page, /extractEmbeddedPaperOutline/);

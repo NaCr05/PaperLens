@@ -1,4 +1,4 @@
-export const PROVIDER_IDS = ["local-codex", "openai", "mimo"];
+export const PROVIDER_IDS = ["local-codex", "cloudbase-hunyuan", "openai", "mimo"];
 export const INVOCATION_MODES = ["translate", "terms", "chat", "auto", "repository"];
 
 const REPOSITORY_QUESTION = /(?:代码|源码|仓库|github|实现|复现|训练脚本|评估脚本|配置|参数|命令行|数据格式|文件|目录|class|function|config|script|implementation|codebase|repository|repo\b|cli\b)/i;
@@ -35,4 +35,10 @@ export function resolveProviderRoute(payload, requestedProvider, availability) {
   }
 
   return { provider: selected, payload };
+}
+
+export function shouldFallbackToMiMo(providerId, errorCode, availability) {
+  return providerId === "cloudbase-hunyuan"
+    && errorCode !== "request_aborted"
+    && Boolean(availability?.mimo);
 }
