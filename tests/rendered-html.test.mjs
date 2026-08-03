@@ -40,9 +40,11 @@ test("server-renders the PaperLens reader shell and metadata", async () => {
 });
 
 test("keeps local learning-material reading, direct Codex calls, scrolling, zoom, and mobile controls wired", async () => {
-  const [page, segmentation, bridge, converter, devScript, usbGateway, layout, styles, skill, pdfWorker] = await Promise.all([
+  const [page, segmentation, translationResponse, aiRecovery, bridge, converter, devScript, usbGateway, layout, styles, skill, pdfWorker] = await Promise.all([
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/page-segmentation.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/translation-response.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/ai-recovery.ts", import.meta.url), "utf8"),
     readFile(new URL("../bridge/server.mjs", import.meta.url), "utf8"),
     readFile(new URL("../bridge/document-converter.mjs", import.meta.url), "utf8"),
     readFile(new URL("../scripts/dev.mjs", import.meta.url), "utf8"),
@@ -97,6 +99,9 @@ test("keeps local learning-material reading, direct Codex calls, scrolling, zoom
   assert.match(page, /getTextContent\(\)/);
   assert.match(page, /CODEX_BRIDGE/);
   assert.match(page, /const CODEX_BRIDGE = "\/api\/codex"/);
+  assert.match(page, /const CODEX_TUTORIAL_URL = "https:\/\/learn\.chatgpt\.com\/docs\/quickstart"/);
+  assert.match(page, /Codex 使用教程/);
+  assert.match(page, /href=\{CODEX_TUTORIAL_URL\} target="_blank" rel="noreferrer"/);
   assert.match(page, /mode: "translate"/);
   assert.match(page, /mode: "terms"/);
   assert.match(page, /parsePaperTerms/);
@@ -111,13 +116,23 @@ test("keeps local learning-material reading, direct Codex calls, scrolling, zoom
   assert.doesNotMatch(page, /embodied agent/);
   assert.match(page, /buildFullTranslationQueue/);
   assert.match(page, /translateFullPaper/);
+  assert.match(page, /MAX_TRANSLATION_REPAIR_ATTEMPTS/);
+  assert.match(page, /completeTranslationWithRepair/);
+  assert.match(page, /Codex 正在诊断并修复/);
+  assert.match(page, /修复仍失败才会显示最终错误/);
+  assert.match(page, /runWithCodexRecovery/);
+  assert.match(aiRecovery, /provider: "local-codex"/);
+  assert.match(bridge, /这是第 \$\{repairAttempt\} 次 Codex 自动修复请求/);
+  assert.match(bridge, /不要只复述错误/);
   assert.match(page, /renderPdfPageForVision/);
+  assert.match(page, /shouldUseVisualPageTranslation/);
+  assert.match(page, /visualPage \? <ChatMarkdown text=\{segment\.translation\} \/>/);
   assert.match(page, /visualPage: source\.visualOnly/);
   assert.match(page, /第 \$\{sourcePage\} 页没有文字层，正在生成整页图片/);
   assert.match(page, /翻译全文/);
   assert.match(page, /compatibleTranslationPages\(restoredTranslations\)/);
   assert.match(page, /const completed = compatibleTranslationPages\(translations\)\.length/);
-  assert.match(page, /isPageTranslationCompatible\(pageNumber, translatedSegments, sourceSegments\)/);
+  assert.match(page, /isPageTranslationCompatible\(pageNumber, translatedSegments\)/);
   assert.match(page, /译文需要更新/);
   assert.match(page, /自动重新加入全文翻译队列/);
   assert.match(page, /extractEmbeddedPaperOutline/);
@@ -198,8 +213,8 @@ test("keeps local learning-material reading, direct Codex calls, scrolling, zoom
   assert.match(page, /item\.role === "assistant" \? <ChatMarkdown text=\{item\.text\} \/>/);
   assert.match(page, /from "\.\/chat-markdown"/);
   assert.match(page, /SOURCE_FORMULA/);
-  assert.match(page, /jsonPunctuationEscape/);
-  assert.match(page, /jsonUnicodeEscape/);
+  assert.match(translationResponse, /jsonPunctuationEscape/);
+  assert.match(translationResponse, /jsonUnicodeEscape/);
   assert.match(page, /activateSegment/);
   assert.match(page, /handleSourceClick/);
   assert.match(page, /selectionMadeRef/);
@@ -302,6 +317,7 @@ test("keeps local learning-material reading, direct Codex calls, scrolling, zoom
   assert.match(styles, /\.translated-segment\.active/);
   assert.match(styles, /\.translated-segment\.context/);
   assert.match(styles, /\.translated-math\.display/);
+  assert.match(styles, /\.tutorial-link/);
   assert.match(styles, /\.formula-explanation/);
   assert.match(skill, /name: paper-reader/);
   assert.match(skill, /## Verify repository claims/);

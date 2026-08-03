@@ -181,6 +181,7 @@ function buildPrompt(payload) {
   const question = compact(payload.question, 4_000);
   const paperTitle = compact(payload.paperTitle, 300);
   const repositoryUrl = compact(payload.repositoryUrl, 500);
+  const repairError = compact(payload.repairError, 1_000);
   const attachedImages = imageMetadata(payload);
   const referencedPapers = referencedPaperContext(payload);
   const referencedFolders = Array.isArray(payload.referencedFolders)
@@ -192,7 +193,7 @@ function buildPrompt(payload) {
   const translationSegments = Array.isArray(payload.segments)
     ? payload.segments.slice(0, 120).map((segment) => ({
         id: compact(segment?.id, 80),
-        kind: segment?.kind === "heading" ? "heading" : "paragraph",
+        kind: segment?.kind === "heading" ? "heading" : segment?.kind === "formula" ? "formula" : "paragraph",
         text: compact(segment?.text, 4_000),
       })).filter((segment) => segment.id && segment.text)
     : [];
@@ -202,6 +203,7 @@ function buildPrompt(payload) {
 
   if (mode === "translate") {
     const visualPage = payload.visualPage === true && attachedImages.length > 0;
+    const repairAttempt = Number.isInteger(payload.repairAttempt) ? Math.max(0, payload.repairAttempt) : 0;
     if (!pageText && !visualPage) throw new Error("当前页没有可翻译文字");
     const pageNumber = Number.isInteger(payload.pageNumber) ? payload.pageNumber : 1;
     const segments = translationSegments.length ? translationSegments : [{ id: `p${pageNumber}-s1`, kind: "paragraph", text: pageText }];
@@ -211,11 +213,13 @@ function buildPrompt(payload) {
       "严格要求：保留章节层级、公式、变量、引用编号和专业术语；不要总结；不要补充原文没有的信息。",
       "公式规则：所有可可靠还原的数学公式必须转写为有效 LaTeX；行内公式使用 \\( ... \\)，独立公式使用 \\[ ... \\]。不要在公式分隔符外裸露下划线、花括号或 \\prod、\\sum 等命令。公式内容本身不要翻译或改写。",
       "PDF 可能把同一公式的主体、乘积/求和符号、上下限和编号拆到多个输入 segment。只要当前 segment 不是一条完整、可独立核对的公式，或公式的任何关键部分位于相邻 segment，就必须使用 [[SOURCE_FORMULA]]；禁止输出缺少乘积号、上下限、条件项或等号一侧的半条 LaTeX 公式。",
+      "kind 为 formula 的 segment 已经把同一条独立公式的几何碎片归并在一起。这类 segment 的 translation 只输出一个 [[SOURCE_FORMULA]]，formulaExplanation 只输出一段统一解释；不得再按求和符号、上下标、括号或编号分开解释。",
       "如果 PDF 抽取结果不足以无歧义地还原某个公式，绝对不要猜；在该公式原本的位置写入精确标记 [[SOURCE_FORMULA]]，界面会引导读者查看左侧原文。",
       "读者明确希望理解公式：只要本段包含公式，就在 formulaExplanation 中用 1–3 句简体中文解释公式表达的关系、主要变量和上下标/求和范围；只依据当前页上下文，不确定的符号要明确说上下文未定义。没有公式时 formulaExplanation 必须是空字符串。",
       "JSON 转义要求：LaTeX 的每个反斜杠在 JSON 字符串中必须写成双反斜杠，例如 \\\\prod、\\\\theta、\\\\[ 和 \\\\]；确保整个输出可被 JSON.parse 直接解析。",
       "为了让原文与译文双向同步，只输出严格 JSON，不要 Markdown 代码围栏，不要输出 JSON 以外的说明。结构必须是：{\"segments\":[{\"id\":\"原始 id\",\"translation\":\"对应中文译文（公式用 LaTeX 或 [[SOURCE_FORMULA]]）\",\"formulaExplanation\":\"公式解释；无公式时为空字符串\"}]}。每个输入 id 必须恰好出现一次、顺序不变，不得合并或拆分段落。",
-      visualPage ? "当前页没有可提取文字层。必须实际查看随请求附带的整页图片，识别并翻译图片中全部清晰可见的英文内容；保留标题、表格行列关系、项目符号、数字和专有名词。看不清的文字标为［无法辨认］，禁止猜测。输入中 [[PAPERLENS_VISUAL_PAGE]] 只是视觉页占位符，不得翻译或出现在译文中。整页译文放入唯一输入 id 对应的 translation；用换行保持阅读顺序。" : "",
+      repairAttempt > 0 ? `这是第 ${repairAttempt} 次 Codex 自动修复请求。上一次任务失败：${repairError || "译文响应不完整"}。请根据错误修复执行方式；本次输入只包含待补译段落，必须逐个完整返回所有 ${segments.length} 个 id，不得省略。` : "",
+      visualPage ? "当前页采用整页视觉翻译：可能没有文字层，也可能因多栏、表格或跨栏内容使文字层顺序不可靠。必须实际查看随请求附带的整页图片，按视觉区块和真实阅读顺序翻译全部清晰可见的英文；绝对不得把同一水平线上的左右栏内容交叉拼接。保留标题、段落、图表标题、数字和专有名词；每个原文段落之间留一个空行。表格必须输出为 Markdown 表格，保持原始列名、行名、数值及加粗关系，表注单独成段，不得与旁边正文混合。看不清的文字标为［无法辨认］，禁止猜测。输入中 [[PAPERLENS_VISUAL_PAGE]] 只是视觉页占位符，不得翻译或出现在译文中。整页译文放入唯一输入 id 对应的 translation。" : "",
       `资料：${paperTitle || "本地资料"}`,
       visualPage ? `图片上下文：${attachedImages.map((image) => `${image.label}${image.pageNumber ? `（第 ${image.pageNumber} 页）` : ""}`).join("、")}` : "",
       "当前页分段原文：",
@@ -230,6 +234,7 @@ function buildPrompt(payload) {
       "你是 PaperLens 的学习资料术语整理助手。只根据下面这一页实际出现的英文内容，提取 6–10 个对理解本页最重要的专业术语或短语，并给出准确、简洁的简体中文译名。",
       "严格要求：term 必须是当前页原文中实际出现的英文形式；优先当前资料特有的方法名、课程概念、任务名、模型名和技术短语；不要输出 author、method、result、model、data 等过于泛化的单词；不要重复、改写或补充原文没有的术语。缩写可保留，并在中文译名中必要时说明全称。",
       "只输出严格 JSON，不要 Markdown 代码围栏，不要输出 JSON 以外的说明。结构必须是：{\"terms\":[{\"term\":\"原文术语\",\"translation\":\"准确中文译名\"}]}。",
+      repairError ? `上一次术语任务失败：${repairError}。请诊断原因并返回符合上述约束的修复结果。` : "",
       `资料：${paperTitle || "本地资料"}`,
       "当前页原文：",
       pageText,
@@ -241,6 +246,7 @@ function buildPrompt(payload) {
     "Use $paper-reader in explanation mode unless this is a repository implementation question.",
     "你是运行在 PaperLens 学习资料阅读工作台里的本机 Codex。请用简体中文回答，先给直接结论，再解释依据。不要假装看过没有提供或没有查到的内容。",
     "公式输出规则：回答中的每一个数学公式都必须写成有效 LaTeX；行内公式使用 \\( ... \\)，独立公式使用 \\[ ... \\]。不要在分隔符外裸露下划线、花括号或 \\prod、\\sum 等 LaTeX 命令，也不要把公式放进 Markdown 代码围栏。对公式的解释要说明它表达的关系、主要变量以及上下标或求和/乘积范围；当前上下文没有定义的符号要明确指出，禁止猜测。",
+    repairError ? `上一次 AI 任务失败：${repairError}。请诊断原因，修复后完成用户原始任务，不要只复述错误。` : "",
     `资料：${paperTitle || "本地资料"}`,
     pageText ? `当前页内容：\n${pageText}` : "",
     selectedText ? `读者选中的重点段落：\n${selectedText}` : "",

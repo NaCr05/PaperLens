@@ -19,3 +19,16 @@ export function createVisualPageSegment(pageNumber: number): VisualPageSegment {
 export function isVisualPageSegments(segments: { id: string; text: string }[] | undefined) {
   return Boolean(segments?.length === 1 && segments[0].text === VISUAL_PAGE_SOURCE && /-visual$/.test(segments[0].id));
 }
+
+export function shouldUseVisualPageTranslation(segments: { text: string }[] | undefined) {
+  if (!segments?.length) return false;
+  const texts = segments.map((segment) => segment.text.replace(/\s+/g, " ").trim()).filter(Boolean);
+  const pageText = texts.join("\n");
+  const hasNumberedTable = /\bTable\s+\d+\s*[:.]/i.test(pageText);
+  if (!hasNumberedTable) return false;
+
+  const ratioCells = pageText.match(/\b\d+(?:\.\d+)?\s*\/\s*\d+(?:\.\d+)?\b/g) || [];
+  const numericCells = texts.filter((text) => /^\d+(?:\.\d+)?(?:\s*[%±]\s*\d+(?:\.\d+)?)?$/.test(text));
+  const hasTableHeader = texts.some((text) => /\bMethod\b/i.test(text) && /\b(?:Score|Result|Task|Average|Accuracy|Success)\b/i.test(text));
+  return ratioCells.length >= 3 || numericCells.length >= 4 || hasTableHeader;
+}

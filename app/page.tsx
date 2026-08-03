@@ -35,6 +35,7 @@ import {
 } from "@ant-design/icons";
 import katex from "katex";
 import { type ChangeEvent as ReactChangeEvent, type ClipboardEvent as ReactClipboardEvent, type FormEvent as ReactFormEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { isAbortError, runWithCodexRecovery } from "./ai-recovery";
 import { ChatMarkdown } from "./chat-markdown";
 import { findClosestPageToViewportCenter, shouldRenderPage } from "./continuous-scroll";
 import { detectCaptionFigureRegions, refineFigureRegionsWithCanvas, type FigureRegion } from "./figure-regions";
@@ -60,6 +61,7 @@ import { alignRenderedTextToSegments, mapPdfTextItemsToSegments, mergeAdjacentTe
 import { buildPageSegments, compatibleTranslationPages, isPageTranslationCompatible, type PageSegment, type PdfTextItem, type PdfViewport } from "./page-segmentation";
 import { parsePaperTerms, type PaperTerm } from "./paper-terms";
 import { buildDetectedPaperOutline, extractEmbeddedPaperOutline, selectMajorPaperOutline, type OutlineHeadingCandidate, type PaperOutlineItem } from "./paper-outline";
+import { completeTranslationWithRepair, MAX_TRANSLATION_REPAIR_ATTEMPTS, TranslationRepairError } from "./translation-response";
 import {
   DEFAULT_CHAT_HEIGHT,
   DEFAULT_PANEL_WIDTHS,
@@ -82,7 +84,7 @@ import {
   type ResizeSide,
 } from "./reader-workspace";
 import { mergeSelectionRects, normalizeSelectionRect, type SelectionRect } from "./selection-geometry";
-import { createVisualPageSegment, isVisualPageSegments, VISUAL_PAGE_SOURCE } from "./visual-page-translation";
+import { createVisualPageSegment, isVisualPageSegments, shouldUseVisualPageTranslation, VISUAL_PAGE_SOURCE } from "./visual-page-translation";
 
 type PdfTextContent = { items: PdfTextItem[]; styles?: Record<string, unknown>; lang?: string | null };
 type PdfRenderTask = { promise: Promise<void>; cancel: () => void };
@@ -229,6 +231,7 @@ const LIBRARY_DB = "paperlens-local-library";
 const LIBRARY_STORE = "papers";
 const LIBRARY_FOLDER_STORE = "folders";
 const AI_SETTINGS_KEY = "paperlens-ai-settings";
+const CODEX_TUTORIAL_URL = "https://learn.chatgpt.com/docs/quickstart";
 const READING_PROGRESS_KEY = "paperlens-reading-progress";
 const READER_LAYOUT_KEY = "paperlens-reader-layout";
 const MAX_PDF_CANVAS_EDGE = 4096;
@@ -553,46 +556,6 @@ async function normalizePastedImage(file: File) {
   return canvas.toDataURL("image/png");
 }
 
-function parseTranslatedSegments(answer: string, source: PageSegment[]): TranslatedSegment[] {
-  const cleaned = answer.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
-  let repaired = "";
-  for (let index = 0; index < cleaned.length; index += 1) {
-    const character = cleaned[index];
-    if (character !== "\\") {
-      repaired += character;
-      continue;
-    }
-    const next = cleaned[index + 1] || "";
-    const afterNext = cleaned[index + 2] || "";
-    const jsonPunctuationEscape = next === '"' || next === "\\" || next === "/";
-    const jsonUnicodeEscape = next === "u" && /^[0-9a-fA-F]{4}$/.test(cleaned.slice(index + 2, index + 6));
-    const jsonControlEscape = /[bfnrt]/.test(next) && !/[A-Za-z]/.test(afterNext);
-    if (jsonUnicodeEscape) {
-      repaired += cleaned.slice(index, index + 6);
-      index += 5;
-    } else if (jsonPunctuationEscape || jsonControlEscape) {
-      repaired += `\\${next}`;
-      index += 1;
-    } else {
-      repaired += "\\\\";
-    }
-  }
-  const parsed = JSON.parse(repaired) as { segments?: { id?: string; translation?: string; formulaExplanation?: string }[] } | { id?: string; translation?: string; formulaExplanation?: string }[];
-  const values = Array.isArray(parsed) ? parsed : parsed.segments;
-  if (!Array.isArray(values)) throw new Error("Codex 没有返回可同步的段落结构");
-  const translated = new Map(values.map((item) => [item.id || "", {
-    translation: (item.translation || "").trim(),
-    formulaExplanation: (item.formulaExplanation || "").trim(),
-  }]));
-  const result = source.map((segment) => ({
-    id: segment.id,
-    translation: translated.get(segment.id)?.translation || "",
-    formulaExplanation: translated.get(segment.id)?.formulaExplanation || "",
-  }));
-  if (result.some((segment) => !segment.translation)) throw new Error("Codex 返回的段落映射不完整，请重新翻译本页");
-  return result;
-}
-
 const SCIENTIFIC_TOKEN_SOURCE = String.raw`(\[\[SOURCE_FORMULA\]\])|\\\[([\s\S]*?)\\\]|\$\$([\s\S]*?)\$\$|\\\(([\s\S]*?)\\\)|\$([^$\n]+?)\$`;
 
 function ScientificText({ text }: { text: string }) {
@@ -784,8 +747,8 @@ function AISettingsModal({
           </div>
         </div>
         {testStatus && <div className="provider-test-status" role="status">{testStatus}</div>}
-        <div className="modal-actions"><button className="plain-button" onClick={onClose}>关闭</button><button className="plain-button" onClick={onRefresh}>刷新状态</button><button className="primary-button" onClick={onTest}>测试当前服务</button></div>
-        <small>仓库实现问题会优先交给本机 Codex 实时核实；PDF 由浏览器解析，Word/PPT 仅会交给本机桥接临时转为 PDF。API Key 不会进入浏览器存储。</small>
+        <div className="modal-actions"><a className="plain-button tutorial-link" href={CODEX_TUTORIAL_URL} target="_blank" rel="noreferrer" aria-label="在新标签页打开 OpenAI Codex 使用教程">Codex 使用教程 <ExportOutlined /></a><button className="plain-button" onClick={onClose}>关闭</button><button className="plain-button" onClick={onRefresh}>刷新状态</button><button className="primary-button" onClick={onTest}>测试当前服务</button></div>
+        <small>AI 任务执行异常时会先交给本机 Codex 诊断和修复，修复仍失败才会显示最终错误；仓库实现问题也会优先由 Codex 实时核实。PDF 由浏览器解析，Word/PPT 仅会交给本机桥接临时转为 PDF。API Key 不会进入浏览器存储。</small>
       </section>
     </div>
   );
@@ -1355,7 +1318,11 @@ export default function Home() {
   const repositoryUrl = detectedRepositoryUrl || repositoryFromReadPages;
   const selectedProvider = providers[aiSettings.provider];
   const selectedProviderAvailable = bridgeStatus === "ready" && Boolean(selectedProvider?.available);
+  const codexAvailable = bridgeStatus === "ready" && Boolean(providers["local-codex"]?.available);
+  const aiTaskProviderAvailable = selectedProviderAvailable || codexAvailable;
+  const effectiveAISettings = useMemo<AISettings>(() => selectedProviderAvailable ? aiSettings : { ...aiSettings, provider: "local-codex" }, [aiSettings, selectedProviderAvailable]);
   const selectedProviderLabel = providerDisplayName(aiSettings.provider, aiSettings.provider !== "local-codex" ? aiSettings.chatModel : undefined);
+  const effectiveProviderLabel = providerDisplayName(effectiveAISettings.provider, effectiveAISettings.provider !== "local-codex" ? effectiveAISettings.chatModel : undefined);
   const selectedStatus: BridgeStatus = bridgeStatus === "checking" ? "checking" : selectedProviderAvailable ? "ready" : "offline";
   const folderMentionRecords = useMemo(() => libraryFolders.map((folder) => ({
     ...folder,
@@ -2396,7 +2363,7 @@ export default function Home() {
     assertCurrentDocument();
     const knownText = pageTexts[sourcePage];
     const knownSegments = pageSegments[sourcePage];
-    if (knownText && knownSegments?.length && !isVisualPageSegments(knownSegments)) {
+    if (knownText && knownSegments?.length && !isVisualPageSegments(knownSegments) && !shouldUseVisualPageTranslation(knownSegments)) {
       return { text: knownText, segments: knownSegments, visualOnly: false, images: [] as ChatImageAttachment[] };
     }
     const sourcePdf = pdfRef.current;
@@ -2434,6 +2401,23 @@ export default function Home() {
         }],
       };
     }
+    if (shouldUseVisualPageTranslation(segments)) {
+      setMessage(`第 ${sourcePage} 页包含复杂表格，正在生成整页视觉输入…`);
+      const dataUrl = await renderPdfPageForVision(page, signal);
+      assertCurrentDocument();
+      return {
+        text: VISUAL_PAGE_SOURCE,
+        segments: [createVisualPageSegment(sourcePage)] as PageSegment[],
+        visualOnly: true,
+        images: [{
+          id: `visual-page-${sourcePage}`,
+          label: `资料第 ${sourcePage} 页整页图片（复杂版式）`,
+          source: "paper" as const,
+          dataUrl,
+          pageNumber: sourcePage,
+        }],
+      };
+    }
     assertCurrentDocument();
     setPageTexts((previous) => ({ ...previous, [sourcePage]: text }));
     setPageSegments((previous) => ({ ...previous, [sourcePage]: segments }));
@@ -2451,16 +2435,35 @@ export default function Home() {
   };
 
   const translatePageSource = async (sourcePage: number, source: Awaited<ReturnType<typeof getTranslationSource>>, signal: AbortSignal) => {
-    const result = await invokeAI({
-      mode: "translate",
-      pageNumber: sourcePage,
-      pageText: source.text,
-      visualPage: source.visualOnly,
-      segments: source.segments.map(({ id, text: segmentText, kind }) => ({ id, text: segmentText, kind })),
-      images: source.images.map(({ label, source: imageSource, pageNumber: imagePageNumber, dataUrl }) => ({ label, source: imageSource, pageNumber: imagePageNumber, dataUrl })),
-      paperTitle: fileName,
-    }, aiSettings, signal);
-    return { result, translated: parseTranslatedSegments(result.answer, source.segments), visualOnly: source.visualOnly };
+    try {
+      const completion = await completeTranslationWithRepair(
+        source.segments,
+        (pendingSegments, repairAttempt, previousFailure) => invokeAI({
+          mode: "translate",
+          pageNumber: sourcePage,
+          pageText: source.text,
+          visualPage: source.visualOnly,
+          repairAttempt,
+          repairError: previousFailure,
+          segments: pendingSegments.map(({ id, text: segmentText, kind }) => ({ id, text: segmentText, kind })),
+          images: source.images.map(({ label, source: imageSource, pageNumber: imagePageNumber, dataUrl }) => ({ label, source: imageSource, pageNumber: imagePageNumber, dataUrl })),
+          paperTitle: fileName,
+        }, repairAttempt > 0 && codexAvailable ? { ...aiSettings, provider: "local-codex" } : effectiveAISettings, signal),
+        (pendingSegments, repairAttempt) => {
+          setMessage(codexAvailable
+            ? `第 ${sourcePage} 页执行异常，Codex 正在诊断并修复（${repairAttempt}/${MAX_TRANSLATION_REPAIR_ATTEMPTS}）…`
+            : `第 ${sourcePage} 页执行异常，${effectiveProviderLabel} 正在自动重试（${repairAttempt}/${MAX_TRANSLATION_REPAIR_ATTEMPTS}）…`);
+        },
+      );
+      const result = completion.results.at(-1)!;
+      const accumulatedUsage = completion.results.reduce<AIUsage | undefined>((usage, nextResult) => mergeTranslationUsage(usage, nextResult.usage), undefined);
+      return { result: { ...result, usage: accumulatedUsage }, translated: completion.translated, visualOnly: source.visualOnly };
+    } catch (error) {
+      if (!(error instanceof TranslationRepairError)) throw error;
+      const missingPreview = error.missingIds.slice(0, 4).join("、");
+      const details = error.parseError || `缺少 ${error.missingIds.length} 个段落${missingPreview ? `：${missingPreview}${error.missingIds.length > 4 ? "…" : ""}` : ""}`;
+      throw new Error(`第 ${sourcePage} 页经 Codex 自动修复 ${MAX_TRANSLATION_REPAIR_ATTEMPTS} 次后仍失败（${details}）`);
+    }
   };
 
   const stopTranslation = () => {
@@ -2473,7 +2476,7 @@ export default function Home() {
       stopTranslation();
       return;
     }
-    if (!selectedProviderAvailable) {
+    if (!aiTaskProviderAvailable) {
       setShowConnect(true);
       return;
     }
@@ -2484,7 +2487,7 @@ export default function Home() {
     setTranslatingPage(sourcePage);
     setRightTab("translation");
     setMobileView("translation");
-    setMessage(`${providerDisplayName(aiSettings.provider, aiSettings.provider !== "local-codex" ? aiSettings.translationModel : undefined)} 正在翻译第 ${sourcePage} 页…`);
+    setMessage(`${providerDisplayName(effectiveAISettings.provider, effectiveAISettings.provider !== "local-codex" ? effectiveAISettings.translationModel : undefined)} 正在翻译第 ${sourcePage} 页…`);
     try {
       const source = await getTranslationSource(sourcePage, controller.signal);
       if (source.visualOnly) setMessage(`${selectedProviderLabel} 正在识别并翻译第 ${sourcePage} 页图片…`);
@@ -2508,7 +2511,7 @@ export default function Home() {
       });
       setMessage(`第 ${sourcePage} 页${source.visualOnly ? "图片识别与" : ""}翻译完成 · ${providerDisplayName(result.provider, result.model)}${result.usage ? ` · ${usageSummary(result.usage)}` : ""}`);
     } catch (error) {
-      if (error instanceof DOMException && error.name === "AbortError") {
+      if (isAbortError(error)) {
         setMessage("已停止当前页翻译");
         return;
       }
@@ -2535,7 +2538,7 @@ export default function Home() {
       setMessage("请先导入资料");
       return;
     }
-    if (!selectedProviderAvailable) {
+    if (!aiTaskProviderAvailable) {
       setShowConnect(true);
       return;
     }
@@ -2559,7 +2562,7 @@ export default function Home() {
     let failedReasons: Record<number, string> = {};
     let consecutiveFailures = 0;
     let accumulatedUsage = fullTranslation.status === "paused" || fullTranslation.status === "failed" ? fullTranslation.usage : undefined;
-    let lastProviderLabel = fullTranslation.providerLabel || selectedProviderLabel;
+    let lastProviderLabel = fullTranslation.providerLabel || effectiveProviderLabel;
     setFullTranslation({ status: "running", completed, total: pdf.numPages, currentPage: queue[0], failedPages: [], failedReasons: {}, usage: accumulatedUsage, providerLabel: lastProviderLabel });
 
     try {
@@ -2584,7 +2587,7 @@ export default function Home() {
           setFullTranslation({ status: "running", completed, total: pdf.numPages, currentPage: sourcePage, failedPages, failedReasons, usage: accumulatedUsage, providerLabel: lastProviderLabel });
           await persistTranslations(nextTranslations);
         } catch (error) {
-          if (controller.signal.aborted || (error instanceof DOMException && error.name === "AbortError")) throw error;
+          if (controller.signal.aborted || isAbortError(error)) throw error;
           failedPages = [...failedPages, sourcePage];
           failedReasons = { ...failedReasons, [sourcePage]: error instanceof Error ? error.message : "翻译暂时不可用" };
           consecutiveFailures += 1;
@@ -2603,7 +2606,7 @@ export default function Home() {
         setMessage(`全文翻译完成 · ${lastProviderLabel}${accumulatedUsage ? ` · ${usageSummary(accumulatedUsage)}` : ""}`);
       }
     } catch (error) {
-      if (controller.signal.aborted || (error instanceof DOMException && error.name === "AbortError")) {
+      if (controller.signal.aborted || isAbortError(error)) {
         setFullTranslation((previous) => ({ ...previous, status: "paused", completed, total: pdf.numPages, currentPage: 0, failedPages, failedReasons, usage: accumulatedUsage, providerLabel: lastProviderLabel }));
         setMessage(`已暂停全文翻译 · 完成 ${completed}/${pdf.numPages} 页`);
       } else {
@@ -2619,7 +2622,7 @@ export default function Home() {
 
   const extractTermsForPage = useCallback(async (sourcePage: number, sourceText: string, force = false) => {
     if (!sourceText.trim() || (!force && (paperTerms[sourcePage] || []).length)) return;
-    if (!selectedProviderAvailable) {
+    if (!aiTaskProviderAvailable) {
       setTermsError("AI 服务尚未连接，连接后即可按当前页整理术语。");
       return;
     }
@@ -2629,12 +2632,21 @@ export default function Home() {
     setExtractingTermsPage(sourcePage);
     setTermsError("");
     try {
-      const result = await invokeAI({
-        mode: "terms",
-        pageText: sourceText.slice(0, 28_000),
-        paperTitle: fileName,
-      }, aiSettings, controller.signal);
-      const extracted = parsePaperTerms(result.answer);
+      const recovery = await runWithCodexRecovery({
+        settings: effectiveAISettings,
+        codexAvailable,
+        run: async (settings, repairError) => {
+          const result = await invokeAI({
+            mode: "terms",
+            pageText: sourceText.slice(0, 28_000),
+            paperTitle: fileName,
+            repairError,
+          }, settings, controller.signal);
+          return { result, extracted: parsePaperTerms(result.answer) };
+        },
+        onRepair: () => setTermsError("Codex 正在诊断并修复术语整理任务…"),
+      });
+      const { result, extracted } = recovery.value;
       const nextTerms = { ...paperTerms, [sourcePage]: extracted };
       setPaperTerms(nextTerms);
       if (currentPaperId) {
@@ -2646,7 +2658,7 @@ export default function Home() {
       }
       setMessage(`第 ${sourcePage} 页术语已更新 · ${providerDisplayName(result.provider, result.model)}`);
     } catch (error) {
-      if (controller.signal.aborted || (error instanceof DOMException && error.name === "AbortError")) return;
+      if (controller.signal.aborted || isAbortError(error)) return;
       setTermsError(error instanceof Error ? error.message : "术语整理暂时不可用");
     } finally {
       if (termsAbortRef.current === controller) {
@@ -2654,7 +2666,7 @@ export default function Home() {
         setExtractingTermsPage(0);
       }
     }
-  }, [aiSettings, currentPaperId, fileName, paperTerms, selectedProviderAvailable]);
+  }, [aiTaskProviderAvailable, codexAvailable, currentPaperId, effectiveAISettings, fileName, paperTerms]);
 
   useEffect(() => {
     termsAbortRef.current?.abort();
@@ -2822,7 +2834,7 @@ export default function Home() {
     const typedQuestion = (preset || chatInput).trim();
     const question = typedQuestion || (chatImages.length ? "请解释这些图片展示的结构、信息流，以及它们与当前页方法的关系。" : "");
     if (!question || isChatting) return;
-    if (!selectedProviderAvailable) {
+    if (!aiTaskProviderAvailable) {
       setShowConnect(true);
       return;
     }
@@ -2910,18 +2922,25 @@ export default function Home() {
       const referencedPapers = [...explicitReferencedPapers, ...rankedFolderPapers];
       const repositoryCandidates = buildPaperAliases([repositoryUrl, ...referencedPapers.map((paper) => paper.repositoryUrl)]);
       const activeRepositoryUrl = repositoryCandidates.find((candidate) => candidate.startsWith("http")) || "";
-      const result = await invokeAI({
-        mode: activeRepositoryUrl ? "auto" : "chat",
-        question,
-        pageText: chatPageSource.text,
-        selectedText,
-        paperTitle: fileName,
-        repositoryUrl: activeRepositoryUrl,
-        referencedPapers,
-        referencedFolders: chatFolderMentions.map((folder) => ({ id: folder.id, name: folder.name, paperCount: folder.paperIds.length })),
-        history,
-        images: [...chatPageSource.images, ...chatImages].map(({ label, source, pageNumber: imagePageNumber, dataUrl }) => ({ label, source, pageNumber: imagePageNumber, dataUrl })),
-      }, aiSettings, controller.signal);
+      const recovery = await runWithCodexRecovery({
+        settings: effectiveAISettings,
+        codexAvailable,
+        run: (settings, repairError) => invokeAI({
+          mode: activeRepositoryUrl ? "auto" : "chat",
+          question,
+          pageText: chatPageSource.text,
+          selectedText,
+          paperTitle: fileName,
+          repositoryUrl: activeRepositoryUrl,
+          referencedPapers,
+          referencedFolders: chatFolderMentions.map((folder) => ({ id: folder.id, name: folder.name, paperCount: folder.paperIds.length })),
+          history,
+          repairError,
+          images: [...chatPageSource.images, ...chatImages].map(({ label, source, pageNumber: imagePageNumber, dataUrl }) => ({ label, source, pageNumber: imagePageNumber, dataUrl })),
+        }, settings, controller.signal),
+        onRepair: () => setMessage("AI 任务执行异常，Codex 正在诊断并修复…"),
+      });
+      const result = recovery.value;
       if (!requestIsCurrent()) return;
       setChatMessages((previous) => [...previous, {
         id: `assistant-${Date.now()}`,
@@ -2936,7 +2955,7 @@ export default function Home() {
         fallbackReason: result.fallbackReason,
       }]);
     } catch (error) {
-      if (requestIsCurrent() && !(error instanceof DOMException && error.name === "AbortError")) {
+      if (requestIsCurrent() && !isAbortError(error)) {
         setChatMessages((previous) => [...previous, { id: `assistant-error-${Date.now()}`, role: "assistant", text: `暂时没有得到可靠回答：${error instanceof Error ? error.message : "AI 服务调用失败"}` }]);
       }
     } finally {
@@ -3851,16 +3870,18 @@ function TranslationView({ pageNumber, sourceSegments, translatedSegments, loadi
     return <div className="translation-loading"><span /><span /><span /><span /><span /></div>;
   }
   const sourceById = new Map(sourceSegments.map((segment) => [segment.id, segment]));
-  const translationCompatible = isPageTranslationCompatible(pageNumber, translatedSegments, sourceSegments);
+  const translationCompatible = isPageTranslationCompatible(pageNumber, translatedSegments);
   if (!translationCompatible) {
     const needsRefresh = translatedSegments.length > 0;
     return <div className="right-empty"><TranslationOutlined /><strong>{needsRefresh ? `第 ${pageNumber} 页译文需要更新` : `第 ${pageNumber} 页尚未翻译`}</strong><span>{needsRefresh ? "原文段落结构已更新，本页会自动重新加入全文翻译队列" : sourceSegments.length ? `由 ${providerLabel} 保留公式、引用和专业术语` : "若本页没有文字层，将自动读取整页图片"}</span><div className="right-empty-actions"><button onClick={onTranslate}>{needsRefresh ? "重新翻译本页" : "翻译本页"}</button><button className="secondary" onClick={onTranslateAll}>{fullTranslationLabel}</button></div></div>;
   }
-  const compatibleTranslations = translatedSegments.filter((segment) => sourceById.has(segment.id));
+  const compatibleTranslations = translatedSegments;
+  const sourceReady = sourceSegments.length > 0;
+  const synchronized = sourceReady && translatedSegments.every((segment) => sourceById.has(segment.id));
   const visualPage = isVisualPageSegments(sourceSegments) || compatibleTranslations.some((segment) => /-visual$/.test(segment.id));
   return (
     <article className="translated-article">
-      <div className="article-kicker">第 {pageNumber} 页 · {providerLabel} 中文译文 · {visualPage ? "整页视觉识别" : "段落同步已开启"}{usage ? ` · ${usageSummary(usage)}` : ""}</div>
+      <div className="article-kicker">第 {pageNumber} 页 · {providerLabel} 中文译文 · {visualPage ? "整页视觉识别" : synchronized ? "段落同步已开启" : sourceReady ? "译文已缓存" : "正在恢复段落同步"}{usage ? ` · ${usageSummary(usage)}` : ""}</div>
       {compatibleTranslations.map((segment) => {
         const source = sourceById.get(segment.id);
         const heading = source?.kind === "heading";
@@ -3882,7 +3903,7 @@ function TranslationView({ pageNumber, sourceSegments, translatedSegments, loadi
             onClick={() => onActivate(segment.id)}
           >
             {(active || (context && segment.id === contextSegmentId)) && <span className="sync-translation-label">{context ? contextKind === "selection" ? "选区所属译文" : "整段上下文" : "对应原文"}</span>}
-            {heading ? <h3><ScientificText text={segment.translation} /></h3> : <p><ScientificText text={segment.translation} /></p>}
+            {visualPage ? <ChatMarkdown text={segment.translation} /> : heading ? <h3><ScientificText text={segment.translation} /></h3> : <p><ScientificText text={segment.translation} /></p>}
             {segment.formulaExplanation && (
               <aside className="formula-explanation">
                 <strong>公式解释</strong>

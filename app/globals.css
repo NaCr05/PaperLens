@@ -495,6 +495,7 @@ body.chat-resizing * { cursor: row-resize !important; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 7px; margin-top: 15px; }
 .plain-button, .primary-button { height: 32px; padding: 0 12px; border-radius: 5px; cursor: pointer; font-size: 12px; }
 .plain-button { border: 0; background: #f1eff4; }
+.tutorial-link { display: inline-flex; align-items: center; gap: 5px; margin-right: auto; color: #5f469f; text-decoration: none; }
 .primary-button { border: 0; background: var(--purple); color: white; }
 .modal > small { display: block; margin-top: 14px; color: #99949f; font-size: 10px; line-height: 1.5; }
 .paste-modal { width: min(620px,100%); }

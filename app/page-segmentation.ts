@@ -12,7 +12,7 @@ export type PdfTextItem = {
 
 export type PdfViewport = { width: number; height: number };
 export type SyncRect = { x: number; y: number; width: number; height: number };
-export type PageSegment = { id: string; text: string; kind: "heading" | "paragraph"; rects: SyncRect[] };
+export type PageSegment = { id: string; text: string; kind: "heading" | "paragraph" | "formula"; rects: SyncRect[] };
 export type StoredTranslationSegment = { id: string; translation?: string };
 
 type Positioned = {
@@ -40,18 +40,17 @@ type Line = {
   parts: Positioned[];
 };
 
-type SegmentDraft = Omit<PageSegment, "id"> & { topY: number };
+type SegmentDraft = Omit<PageSegment, "id"> & { topY: number; lane: Lane };
 export const SEGMENTATION_VERSION = 2;
 
 export function isPageTranslationCompatible(
   pageNumber: number,
   translatedSegments: readonly StoredTranslationSegment[],
-  sourceSegments?: readonly Pick<PageSegment, "id">[],
 ) {
   if (!translatedSegments.length || translatedSegments.some((segment) => !segment.translation?.trim())) return false;
   const visualId = `p${pageNumber}-visual`;
   const visualTranslation = translatedSegments.length === 1 && translatedSegments[0].id === visualId;
-  if (visualTranslation) return !sourceSegments || (sourceSegments.length === 1 && sourceSegments[0].id === visualId);
+  if (visualTranslation) return true;
 
   const prefix = `p${pageNumber}-v${SEGMENTATION_VERSION}-s`;
   const indices = translatedSegments.map((segment) => {
@@ -61,11 +60,7 @@ export function isPageTranslationCompatible(
   const validVersionedSequence = indices.every((index) => Number.isInteger(index) && index > 0)
     && new Set(indices).size === indices.length
     && indices.every((_, index) => indices.includes(index + 1));
-  if (!validVersionedSequence) return false;
-  if (!sourceSegments) return true;
-  if (sourceSegments.length !== translatedSegments.length) return false;
-  const translatedIds = new Set(translatedSegments.map((segment) => segment.id));
-  return sourceSegments.every((segment) => translatedIds.has(segment.id));
+  return validVersionedSequence;
 }
 
 export function compatibleTranslationPages(translations: Record<number, readonly StoredTranslationSegment[]>) {
@@ -139,7 +134,65 @@ function draftFromLines(block: Line[], viewport: PdfViewport): SegmentDraft | nu
     kind: block.length === 1 && block[0].heading ? "heading" : "paragraph",
     rects,
     topY: Math.max(...block.map((line) => line.y)),
+    lane: block[0].lane,
   };
+}
+
+function draftBounds(draft: Pick<SegmentDraft, "rects">) {
+  return {
+    top: Math.min(...draft.rects.map((rect) => rect.y)),
+    bottom: Math.max(...draft.rects.map((rect) => rect.y + rect.height)),
+  };
+}
+
+function hasMathGlyph(text: string) {
+  return /[\p{Math}‖ℒΦξτθϵ̃˜︁]/u.test(text);
+}
+
+function isFormulaFragment(text: string) {
+  const compact = text.replace(/\s+/g, " ").trim();
+  if (!compact || compact.length > 220) return false;
+  const proseWords = compact.match(/[A-Za-z]{3,}/g) || [];
+  return proseWords.length <= 1 && (hasMathGlyph(compact) || /^\(?\d+\)?$/.test(compact));
+}
+
+/**
+ * PDF text layers place superscripts, subscripts, sum bounds, brackets, and the
+ * equation number on slightly different baselines. The regular paragraph
+ * builder can therefore emit a dozen vertically overlapping drafts for one
+ * displayed equation. Coalesce that overlap before assigning stable segment
+ * ids so translation receives one formula block instead of one request item
+ * per glyph fragment.
+ */
+function mergeOverlappingFormulaDrafts(drafts: SegmentDraft[]): SegmentDraft[] {
+  const merged: SegmentDraft[] = [];
+  for (const draft of drafts) {
+    const previous = merged[merged.length - 1];
+    if (!previous || previous.lane !== draft.lane) {
+      merged.push(draft);
+      continue;
+    }
+    const previousBounds = draftBounds(previous);
+    const nextBounds = draftBounds(draft);
+    const overlapsVertically = nextBounds.top <= previousBounds.bottom + .0015
+      && nextBounds.bottom >= previousBounds.top - .0015;
+    const formulaRelated = isFormulaFragment(previous.text)
+      || isFormulaFragment(draft.text)
+      || (hasMathGlyph(previous.text) && hasMathGlyph(draft.text));
+    const realHeadingBarrier = (previous.kind === "heading" && !isFormulaFragment(previous.text))
+      || (draft.kind === "heading" && !isFormulaFragment(draft.text));
+    if (!overlapsVertically || !formulaRelated || realHeadingBarrier) {
+      merged.push(draft);
+      continue;
+    }
+    const formulaBlock = previous.kind === "formula"
+      || (isFormulaFragment(previous.text) && isFormulaFragment(draft.text));
+    previous.text = `${previous.text} ${draft.text}`.replace(/\s+/g, " ").trim();
+    previous.rects.push(...draft.rects);
+    previous.topY = Math.max(previous.topY, draft.topY);
+    previous.kind = formulaBlock ? "formula" : "paragraph";
+  }
+  return merged;
 }
 
 export function buildPageSegments(
@@ -288,11 +341,11 @@ export function buildPageSegments(
 
   const captions = figures.flatMap((_, figureIndex) => {
     const captionLines = classified.filter((line) => line.captionIndex === figureIndex && !line.marginArtifact).sort((a, b) => b.y - a.y || a.x - b.x);
-    const draft = draftFromLines(captionLines, viewport);
+    const draft = draftFromLines(captionLines.map((line) => ({ ...line, lane: "wide" as Lane })), viewport);
     return draft ? [draft] : [];
   });
   const orderedDrafts = twoColumnPage ? [...drafts, ...captions] : [...drafts, ...captions].sort((a, b) => b.topY - a.topY);
-  return orderedDrafts.map((draft, index) => ({
+  return mergeOverlappingFormulaDrafts(orderedDrafts).map((draft, index) => ({
     id: `p${pageNumber}-v${SEGMENTATION_VERSION}-s${index + 1}`,
     text: draft.text,
     kind: draft.kind,
