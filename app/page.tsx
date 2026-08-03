@@ -1382,7 +1382,17 @@ export default function Home() {
       const nextProviders = health.providers || {};
       setProviders(nextProviders);
       setSkillAvailable(Boolean(nextProviders["local-codex"]?.skillAvailable));
-      if (!localStorage.getItem(AI_SETTINGS_KEY) && health.defaultProvider && nextProviders[health.defaultProvider]?.available) {
+      let storedProvider: AIProviderId | undefined;
+      try {
+        const stored = JSON.parse(localStorage.getItem(AI_SETTINGS_KEY) || "null") as Partial<AISettings> | null;
+        if (stored?.provider === "local-codex" || stored?.provider === "openai" || stored?.provider === "mimo") {
+          storedProvider = stored.provider;
+        }
+      } catch {
+        // The settings loader below removes malformed state.
+      }
+      const selectedProvider = storedProvider || DEFAULT_AI_SETTINGS.provider;
+      if (!nextProviders[selectedProvider]?.available && health.defaultProvider && nextProviders[health.defaultProvider]?.available) {
         const provider = health.defaultProvider;
         const models = nextProviders[provider]?.models;
         setAISettings((previous) => ({
