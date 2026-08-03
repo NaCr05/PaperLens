@@ -1286,6 +1286,7 @@ export default function Home() {
   const [mentionRange, setMentionRange] = useState<MentionRange | null>(null);
   const [mentionIndex, setMentionIndex] = useState(0);
   const [isChatting, setIsChatting] = useState(false);
+  const [chatStatus, setChatStatus] = useState("");
   const [bridgeStatus, setBridgeStatus] = useState<BridgeStatus>("checking");
   const [providers, setProviders] = useState<ProviderMap>({});
   const [aiSettings, setAISettings] = useState<AISettings>(DEFAULT_AI_SETTINGS);
@@ -1816,6 +1817,7 @@ export default function Home() {
     chatAbortRef.current?.abort();
     chatAbortRef.current = null;
     setIsChatting(false);
+    setChatStatus("");
     translationAbortRef.current?.abort();
     translationAbortRef.current = null;
     termsAbortRef.current?.abort();
@@ -2001,6 +2003,7 @@ export default function Home() {
     translationAbortRef.current?.abort();
     termsAbortRef.current?.abort();
     setIsChatting(false);
+    setChatStatus("");
     setOpeningPaperId(paper.id);
     try {
       await pendingHighlightWrites.catch(() => undefined);
@@ -2043,6 +2046,7 @@ export default function Home() {
         chatAbortRef.current?.abort();
         chatAbortRef.current = null;
         setIsChatting(false);
+        setChatStatus("");
         if (pdf) {
           try {
             await pdf.destroy?.();
@@ -2153,6 +2157,7 @@ export default function Home() {
     translationAbortRef.current?.abort();
     termsAbortRef.current?.abort();
     setIsChatting(false);
+    setChatStatus("");
     setOpeningPaperId("");
     setPendingSelection(null);
     setCommentEditor(null);
@@ -2375,7 +2380,12 @@ export default function Home() {
     setMessage("橡皮擦已局部擦除标亮");
   }, [commitHighlights]);
 
-  const getTranslationSource = async (sourcePage: number, signal: AbortSignal, generation = documentGenerationRef.current) => {
+  const getTranslationSource = async (
+    sourcePage: number,
+    signal: AbortSignal,
+    generation = documentGenerationRef.current,
+    reportStatus: (status: string) => void = setMessage,
+  ) => {
     const assertCurrentDocument = () => {
       if (signal.aborted || !isCurrentDocumentGeneration(generation, documentGenerationRef.current)) {
         throw new DOMException("Aborted", "AbortError");
@@ -2404,7 +2414,7 @@ export default function Home() {
     const segments = buildPageSegments(content.items, viewport, sourcePage, figures);
     const text = segments.map((segment) => segment.text).join("\n\n").trim().slice(0, 28_000);
     if (!text || !segments.length) {
-      setMessage(`第 ${sourcePage} 页没有文字层，正在生成整页图片…`);
+      reportStatus(`第 ${sourcePage} 页没有文字层，正在生成整页图片…`);
       const dataUrl = await renderPdfPageForVision(page, signal);
       assertCurrentDocument();
       const visualSegments = [createVisualPageSegment(sourcePage)] as PageSegment[];
@@ -2423,7 +2433,7 @@ export default function Home() {
       };
     }
     if (shouldUseVisualPageTranslation(segments)) {
-      setMessage(`第 ${sourcePage} 页包含复杂表格，正在生成整页视觉输入…`);
+      reportStatus(`第 ${sourcePage} 页包含复杂表格，正在生成整页视觉输入…`);
       const dataUrl = await renderPdfPageForVision(page, signal);
       assertCurrentDocument();
       const visualSegments = [createVisualPageSegment(sourcePage)] as PageSegment[];
@@ -2669,7 +2679,7 @@ export default function Home() {
         },
         onRepair: () => setTermsError("Codex 正在诊断并修复术语整理任务…"),
       });
-      const { result, extracted } = recovery.value;
+      const { extracted } = recovery.value;
       const nextTerms = { ...paperTerms, [sourcePage]: extracted };
       setPaperTerms(nextTerms);
       if (currentPaperId) {
@@ -2679,7 +2689,6 @@ export default function Home() {
           console.error("Paper terms persistence failed", error);
         }
       }
-      setMessage(`第 ${sourcePage} 页术语已更新 · ${providerDisplayName(result.provider, result.model)}`);
     } catch (error) {
       if (controller.signal.aborted || isAbortError(error)) return;
       setTermsError(error instanceof Error ? error.message : "术语整理暂时不可用");
@@ -2883,8 +2892,9 @@ export default function Home() {
     setChatInput("");
     setChatOpen(true);
     setIsChatting(true);
+    setChatStatus("");
     try {
-      const chatPageSource = await getTranslationSource(requestPage, controller.signal, requestGeneration);
+      const chatPageSource = await getTranslationSource(requestPage, controller.signal, requestGeneration, setChatStatus);
       if (!requestIsCurrent()) return;
       if (chatPageSource.images.length) {
         setChatMessages((previous) => previous.map((message) => message.id === userMessage.id
@@ -2961,7 +2971,7 @@ export default function Home() {
           repairError,
           images: [...chatPageSource.images, ...chatImages].map(({ label, source, pageNumber: imagePageNumber, dataUrl }) => ({ label, source, pageNumber: imagePageNumber, dataUrl })),
         }, settings, controller.signal),
-        onRepair: () => setMessage("AI 任务执行异常，Codex 正在诊断并修复…"),
+        onRepair: () => setChatStatus("AI 任务执行异常，Codex 正在诊断并修复…"),
       });
       const result = recovery.value;
       if (!requestIsCurrent()) return;
@@ -2985,6 +2995,7 @@ export default function Home() {
       if (chatAbortRef.current === controller) {
         chatAbortRef.current = null;
         setIsChatting(false);
+        setChatStatus("");
         if (isCurrentDocumentGeneration(requestGeneration, documentGenerationRef.current)) {
           requestAnimationFrame(() => chatInputRef.current?.focus());
         }
@@ -3642,7 +3653,7 @@ export default function Home() {
                     </div>
                   </div>
                 ) : chatMessages.map((item) => <div key={item.id} className={`chat-message ${item.role}`}><span>{item.role === "assistant" ? <RobotOutlined /> : "你"}</span><div>{item.role === "assistant" ? <ChatMarkdown text={item.text} /> : <p>{item.text}</p>}{item.folderLabels?.length ? <small className="message-folders"><FolderOutlined /> {item.folderLabels.join("、")}</small> : null}{item.paperLabels?.length ? <small className="message-papers"><FilePdfOutlined /> {item.paperLabels.join("、")}</small> : null}{item.imageLabels?.length ? <small className="message-images"><PictureOutlined /> {item.imageLabels.join("、")}</small> : null}{item.role === "assistant" && item.repositoryUsed !== undefined ? <small className={`message-repository ${item.repositoryUsed ? "verified" : "skipped"}`}><GithubOutlined /> {item.repositoryUsed ? `已核实 ${item.repositoryName}` : "本次无需读取仓库"}</small> : null}{item.role === "assistant" && (item.providerLabel || item.usage) ? <small className="message-provider">{item.fallbackReason ? `${item.fallbackReason} · ` : ""}{item.providerLabel}{item.usage ? ` · ${usageSummary(item.usage)}` : ""}{item.latencyMs ? ` · ${(item.latencyMs / 1000).toFixed(1)}s` : ""}</small> : null}</div></div>)}
-                {isChatting && <div className="chat-message assistant loading"><span><RobotOutlined /></span><p>{chatFolderMentions.length ? `${selectedProviderLabel} 正在检索文件夹中的相关资料与证据页…` : repositoryUrl || chatPaperMentions.some((paper) => paper.repositoryUrl) ? `${selectedProviderLabel} 正在检索引用资料并判断是否需要核实仓库…` : chatPaperMentions.length ? `${selectedProviderLabel} 正在检索引用资料的相关页面…` : `${selectedProviderLabel} 正在阅读上下文…`}</p></div>}
+                {isChatting && <div className="chat-message assistant loading"><span><RobotOutlined /></span><p>{chatStatus || (chatFolderMentions.length ? `${selectedProviderLabel} 正在检索文件夹中的相关资料与证据页…` : repositoryUrl || chatPaperMentions.some((paper) => paper.repositoryUrl) ? `${selectedProviderLabel} 正在检索引用资料并判断是否需要核实仓库…` : chatPaperMentions.length ? `${selectedProviderLabel} 正在检索引用资料的相关页面…` : `${selectedProviderLabel} 正在阅读上下文…`)}</p></div>}
               </div>
               <div className="chat-composer">
                 {mentionRange && (

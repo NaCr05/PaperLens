@@ -11,6 +11,7 @@ import { createCloudBaseHunyuanProvider } from "./providers/cloudbase-hunyuan.mj
 import { createMiMoProvider } from "./providers/mimo.mjs";
 import { createOpenAIProvider } from "./providers/openai.mjs";
 import { createDocumentConverter, DocumentConversionError } from "./document-converter.mjs";
+import { createRequestActivityTracker } from "./request-activity.mjs";
 
 const HOST = "127.0.0.1";
 const PORT = Number(process.env.PAPERLENS_CODEX_PORT || 43123);
@@ -30,7 +31,7 @@ const ALLOWED_ORIGINS = new Set([
 
 let codexPath = "codex";
 let codexAvailable = false;
-const activeProviders = new Set();
+const requestActivity = createRequestActivityTracker();
 let documentConversionActive = false;
 let skillAvailable = false;
 
@@ -374,13 +375,15 @@ async function runCodex(payload, { signal } = {}) {
 }
 
 function providerHealth() {
+  const activity = (providerId) => requestActivity.snapshot(providerId);
   return {
     "local-codex": {
       id: "local-codex",
       label: "本机 Codex",
       configured: codexAvailable,
       available: codexAvailable,
-      busy: activeProviders.has("local-codex"),
+      busy: activity("local-codex").total > 0,
+      activeTasks: activity("local-codex").channels,
       skillAvailable,
       capabilities: { text: true, images: true, structuredOutput: true, repositoryVerification: true },
     },
@@ -389,7 +392,8 @@ function providerHealth() {
       label: openAIProvider.label,
       configured: openAIProvider.configured,
       available: openAIProvider.configured,
-      busy: activeProviders.has("openai"),
+      busy: activity("openai").total > 0,
+      activeTasks: activity("openai").channels,
       capabilities: openAIProvider.capabilities,
       models: openAIProvider.models,
       allowedModels: openAIProvider.allowedModels,
@@ -400,7 +404,8 @@ function providerHealth() {
       label: cloudBaseHunyuanProvider.label,
       configured: cloudBaseHunyuanProvider.configured,
       available: cloudBaseHunyuanProvider.configured,
-      busy: activeProviders.has("cloudbase-hunyuan"),
+      busy: activity("cloudbase-hunyuan").total > 0,
+      activeTasks: activity("cloudbase-hunyuan").channels,
       capabilities: cloudBaseHunyuanProvider.capabilities,
       models: cloudBaseHunyuanProvider.models,
       allowedModels: cloudBaseHunyuanProvider.allowedModels,
@@ -410,7 +415,8 @@ function providerHealth() {
       label: mimoProvider.label,
       configured: mimoProvider.configured,
       available: mimoProvider.configured,
-      busy: activeProviders.has("mimo"),
+      busy: activity("mimo").total > 0,
+      activeTasks: activity("mimo").channels,
       capabilities: mimoProvider.capabilities,
       models: mimoProvider.models,
       allowedModels: mimoProvider.allowedModels,
@@ -540,6 +546,7 @@ const server = createServer(async (request, response) => {
   }
 
   let activeProvider = "";
+  let releaseActiveProvider = () => {};
   try {
     const payload = await readJson(request);
     if (!INVOCATION_MODES.includes(payload.mode)) {
@@ -552,11 +559,7 @@ const server = createServer(async (request, response) => {
       throw new ProviderError(route.unsupportedReason, { code: "capability_unavailable", status: 503, provider: route.provider });
     }
     activeProvider = route.provider;
-    if (activeProviders.has(activeProvider)) {
-      const activeLabel = activeProvider === "openai" ? "OpenAI API" : activeProvider === "mimo" ? "MiMo API" : activeProvider === "cloudbase-hunyuan" ? "CloudBase Hy3" : "本机 Codex";
-      throw new ProviderError(`${activeLabel} 正在处理上一条请求`, { code: "provider_busy", status: 429, retryable: true, provider: activeProvider });
-    }
-    activeProviders.add(activeProvider);
+    releaseActiveProvider = requestActivity.start(activeProvider, route.payload.mode);
     const controller = new AbortController();
     request.on("aborted", () => controller.abort());
     response.on("close", () => { if (!response.writableEnded) controller.abort(); });
@@ -574,15 +577,15 @@ const server = createServer(async (request, response) => {
     } catch (error) {
       const normalized = normalizeProviderError(error, activeProvider);
       const canFallbackToMiMo = shouldFallbackToMiMo(activeProvider, normalized.code, {
-        mimo: mimoProvider.configured && !activeProviders.has("mimo"),
+        mimo: mimoProvider.configured,
       });
       if (!canFallbackToMiMo) throw normalized;
-      activeProviders.add("mimo");
+      const releaseFallback = requestActivity.start("mimo", route.payload.mode);
       try {
         result = await invokeProvider("mimo", route.payload, requestOptions);
         runtimeFallbackReason = `CloudBase Hy3 暂不可用（${normalized.message}），已自动切换 MiMo`;
       } finally {
-        activeProviders.delete("mimo");
+        releaseFallback();
       }
     }
     sendJson(response, 200, {
@@ -600,7 +603,7 @@ const server = createServer(async (request, response) => {
       retryable: normalized.retryable,
     }, origin);
   } finally {
-    if (activeProvider) activeProviders.delete(activeProvider);
+    releaseActiveProvider();
   }
 });
 

@@ -143,6 +143,8 @@ test("keeps local learning-material reading, direct Codex calls, scrolling, zoom
   assert.match(page, /translationUpdatedAt/);
   assert.match(page, /persistTranslations/);
   assert.match(page, /mode: activeRepositoryUrl \? "auto" : "chat"/);
+  assert.match(page, /getTranslationSource\(requestPage, controller\.signal, requestGeneration, setChatStatus\)/);
+  assert.match(page, /onRepair: \(\) => setChatStatus\("AI 任务执行异常，Codex 正在诊断并修复…"\)/);
   assert.match(page, /inspectPdfIdentity/);
   assert.match(page, /inferPaperTitle/);
   assert.match(page, /aliases: identity\.aliases/);
@@ -238,6 +240,8 @@ test("keeps local learning-material reading, direct Codex calls, scrolling, zoom
 
   assert.match(bridge, /spawn\(codexPath/);
   assert.match(bridge, /materializeImages/);
+  assert.match(bridge, /requestActivity\.start\(activeProvider, route\.payload\.mode\)/);
+  assert.doesNotMatch(bridge, /code: "provider_busy"/);
   assert.match(bridge, /PAPERLENS_VISUAL_PAGE/);
   assert.match(bridge, /学习资料翻译助手/);
   assert.match(bridge, /必须实际查看随请求附带的整页图片/);
