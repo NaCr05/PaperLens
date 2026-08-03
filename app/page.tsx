@@ -45,6 +45,7 @@ import { eraseHighlightAtPoint, type EraserPoint } from "./highlight-eraser";
 import { isCurrentDocumentGeneration, isImeCompositionEvent, normalizeCommittedPageInput } from "./interaction-guards";
 import {
   buildPaperAliases,
+  buildWholeDocumentChatContext,
   choosePaperDisplayName,
   getActivePaperMention,
   inferPaperTitle,
@@ -1222,6 +1223,7 @@ export default function Home() {
   const folderNameInputRef = useRef<HTMLInputElement>(null);
   const chatInputRef = useRef<HTMLTextAreaElement>(null);
   const referencedPaperCacheRef = useRef(new Map<string, Promise<PaperPageText[]>>());
+  const currentPaperPageIndexRef = useRef<{ generation: number; pages: Promise<PaperPageText[]> } | null>(null);
   const identityHydrationRef = useRef(new Set<string>());
   const selectionMadeRef = useRef(false);
   const translationAbortRef = useRef<AbortController | null>(null);
@@ -2858,6 +2860,38 @@ export default function Home() {
     return pending;
   }, []);
 
+  const loadCurrentPaperPages = useCallback((generation: number) => {
+    const cached = currentPaperPageIndexRef.current;
+    if (cached?.generation === generation) return cached.pages;
+    const sourcePdf = pdfRef.current;
+    if (!sourcePdf) return Promise.reject(new Error("当前资料尚未打开"));
+    const pending = (async () => {
+      const pages: PaperPageText[] = [];
+      const pageNumbers = Array.from({ length: sourcePdf.numPages }, (_, index) => index + 1);
+      for (let offset = 0; offset < pageNumbers.length; offset += 4) {
+        if (!isCurrentDocumentGeneration(generation, documentGenerationRef.current)) throw new DOMException("Aborted", "AbortError");
+        const batch = await Promise.all(pageNumbers.slice(offset, offset + 4).map(async (targetPage) => {
+          try {
+            const page = await sourcePdf.getPage(targetPage);
+            const content = await page.getTextContent();
+            return { pageNumber: targetPage, text: content.items.map((item) => item.str || "").join(" ").replace(/\s+/g, " ").trim() };
+          } catch (error) {
+            console.error(`PDF page ${targetPage} chat indexing failed`, error);
+            return { pageNumber: targetPage, text: "" };
+          }
+        }));
+        pages.push(...batch);
+      }
+      if (!isCurrentDocumentGeneration(generation, documentGenerationRef.current)) throw new DOMException("Aborted", "AbortError");
+      return pages;
+    })();
+    currentPaperPageIndexRef.current = { generation, pages: pending };
+    pending.catch(() => {
+      if (currentPaperPageIndexRef.current?.generation === generation) currentPaperPageIndexRef.current = null;
+    });
+    return pending;
+  }, []);
+
   const sendChat = async (preset?: string) => {
     if (isChatting) {
       chatAbortRef.current?.abort();
@@ -2892,10 +2926,21 @@ export default function Home() {
     setChatInput("");
     setChatOpen(true);
     setIsChatting(true);
-    setChatStatus("");
+    setChatStatus(`正在检索整篇 PDF（${pdfRef.current?.numPages || 0} 页）…`);
     try {
-      const chatPageSource = await getTranslationSource(requestPage, controller.signal, requestGeneration, setChatStatus);
+      const [chatPageSource, currentPaperPages] = await Promise.all([
+        getTranslationSource(requestPage, controller.signal, requestGeneration, setChatStatus),
+        loadCurrentPaperPages(requestGeneration),
+      ]);
       if (!requestIsCurrent()) return;
+      const wholeDocumentContext = buildWholeDocumentChatContext(
+        question,
+        currentPaperPages,
+        requestPage,
+        chatPageSource.text,
+        pdfRef.current?.numPages || currentPaperPages.length,
+      );
+      setChatStatus(`已检索整篇 PDF，正在结合第 ${wholeDocumentContext.contextPageNumbers.join("、")} 页回答…`);
       if (chatPageSource.images.length) {
         setChatMessages((previous) => previous.map((message) => message.id === userMessage.id
           ? { ...message, imageLabels: [...(message.imageLabels || []), ...chatPageSource.images.map((image) => image.label)] }
@@ -2961,7 +3006,7 @@ export default function Home() {
         run: (settings, repairError) => invokeAI({
           mode: activeRepositoryUrl ? "auto" : "chat",
           question,
-          pageText: chatPageSource.text,
+          pageText: wholeDocumentContext.text,
           selectedText,
           paperTitle: fileName,
           repositoryUrl: activeRepositoryUrl,

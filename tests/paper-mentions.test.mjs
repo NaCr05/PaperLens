@@ -8,6 +8,7 @@ import {
   inferPaperTitle,
   rankFolderPaperContexts,
   rankPaperPages,
+  buildWholeDocumentChatContext,
   removeMentionQuery,
   searchMentionPapers,
   searchMentionTargets,
@@ -94,4 +95,24 @@ test("ranks pages related to the actual question while retaining overview contex
     { pageNumber: 11, text: "Experiments" },
   ], 2);
   assert.deepEqual(ranked.map((page) => page.pageNumber), [1, 8]);
+});
+
+test("builds current-paper chat context by searching the entire PDF", () => {
+  const context = buildWholeDocumentChatContext("action tokenizer training", [
+    { pageNumber: 1, text: "Native Video Action Pretraining abstract and overview" },
+    { pageNumber: 2, text: "Related work" },
+    { pageNumber: 5, text: "Current page discusses policy inputs" },
+    { pageNumber: 8, text: "We train the action tokenizer with discrete tokens and a tokenizer objective" },
+    { pageNumber: 11, text: "Action tokenizer training ablations and results" },
+    { pageNumber: 12, text: "" },
+  ], 5, "Current page discusses policy inputs", 12, 3);
+
+  assert.equal(context.indexedPages, 5);
+  assert.equal(context.totalPages, 12);
+  assert.equal(context.contextPageNumbers[0], 5);
+  assert.equal(context.contextPageNumbers.filter((page) => page === 5).length, 1);
+  assert.ok(context.contextPageNumbers.includes(8));
+  assert.ok(context.contextPageNumbers.includes(11));
+  assert.match(context.text, /已检索整篇 PDF 中 5\/12 个具有可提取文字的页面/);
+  assert.match(context.text, /整篇 PDF 检索证据，第 8 页/);
 });

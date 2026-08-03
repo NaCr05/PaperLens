@@ -49,9 +49,11 @@ test("P1 persistence and async isolation contracts stay wired", async () => {
   assert.match(page, /if \(!requestIsCurrent\(\)\) return;[\s\S]{0,120}setChatMessages/);
   assert.match(page, /if \(chatAbortRef\.current === controller\) \{[\s\S]{0,180}setIsChatting\(false\)/);
 
-  assert.match(page, /const chatPageSource = await getTranslationSource\(requestPage, controller\.signal, requestGeneration, setChatStatus\)/);
+  assert.match(page, /const \[chatPageSource, currentPaperPages\] = await Promise\.all/);
   assert.match(page, /text extraction failed; using visual fallback[\s\S]{0,180}content = \{ items: \[\] \}/);
-  assert.match(page, /pageText: chatPageSource\.text/);
+  assert.match(page, /loadCurrentPaperPages\(requestGeneration\)/);
+  assert.match(page, /buildWholeDocumentChatContext/);
+  assert.match(page, /pageText: wholeDocumentContext\.text/);
   assert.match(page, /images: \[\.\.\.chatPageSource\.images, \.\.\.chatImages\]/);
   assert.match(page, /if \(isImeCompositionEvent\(event\.nativeEvent\)\) return;/);
 

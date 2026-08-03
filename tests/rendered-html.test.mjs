@@ -152,6 +152,8 @@ test("keeps local learning-material reading, direct Codex calls, scrolling, zoom
   assert.match(page, /searchMentionTargets/);
   assert.match(page, /loadReferencedPaperPages/);
   assert.match(page, /rankPaperPages/);
+  assert.match(page, /loadCurrentPaperPages/);
+  assert.match(page, /buildWholeDocumentChatContext/);
   assert.match(page, /从我的空间引用资料/);
   assert.match(page, /Math\.min\(pdf\.numPages, 4\)/);
   assert.match(page, /GitHub repository discovery failed/);

@@ -20,6 +20,13 @@ export type MentionSuggestion<TPaper extends PaperMentionRecord, TFolder extends
 
 export type MentionRange = { start: number; end: number; query: string };
 export type PaperPageText = { pageNumber: number; text: string };
+export type WholeDocumentChatContext = {
+  text: string;
+  contextPageNumbers: number[];
+  relatedPages: PaperPageText[];
+  indexedPages: number;
+  totalPages: number;
+};
 
 type TitleTextItem = { str?: string; transform?: number[] };
 
@@ -237,6 +244,38 @@ export function rankPaperPages(question: string, pages: PaperPageText[], limit =
     .slice(0, limit)
     .sort((a, b) => a.pageNumber - b.pageNumber)
     .map(({ pageNumber, text }) => ({ pageNumber, text }));
+}
+
+export function buildWholeDocumentChatContext(
+  question: string,
+  pages: PaperPageText[],
+  currentPage: number,
+  currentPageText: string,
+  totalPages: number,
+  maxRelatedPages = 5,
+): WholeDocumentChatContext {
+  const indexedPages = pages.filter((page) => page.text.trim()).length;
+  const relatedPages = rankPaperPages(
+    question,
+    pages.filter((page) => page.pageNumber !== currentPage),
+    maxRelatedPages,
+  );
+  const currentText = currentPageText.trim().slice(0, 12_000);
+  const relatedText = relatedPages.map((page) => (
+    `[整篇 PDF 检索证据，第 ${page.pageNumber} 页]\n${page.text.trim().slice(0, 2_800)}`
+  )).join("\n\n");
+  const coverage = `已检索整篇 PDF 中 ${indexedPages}/${Math.max(totalPages, indexedPages)} 个具有可提取文字的页面`;
+  return {
+    text: [
+      `[当前阅读页，第 ${currentPage} 页]\n${currentText}`,
+      `[整篇 PDF 检索说明]\n${coverage}；以下是与当前问题最相关的其他证据页。回答必须注明证据页码；未提供的页面内容不得猜测。`,
+      relatedText,
+    ].filter(Boolean).join("\n\n"),
+    contextPageNumbers: [currentPage, ...relatedPages.map((page) => page.pageNumber)],
+    relatedPages,
+    indexedPages,
+    totalPages,
+  };
 }
 
 export function rankFolderPaperContexts<T extends PaperMentionRecord & { pages: PaperPageText[] }>(
