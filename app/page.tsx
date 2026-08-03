@@ -1378,10 +1378,20 @@ export default function Home() {
     try {
       const response = await fetch(`${CODEX_BRIDGE}/health`, { cache: "no-store" });
       if (!response.ok) throw new Error("Bridge unavailable");
-      const health = await response.json() as { providers?: ProviderMap };
+      const health = await response.json() as { providers?: ProviderMap; defaultProvider?: AIProviderId };
       const nextProviders = health.providers || {};
       setProviders(nextProviders);
       setSkillAvailable(Boolean(nextProviders["local-codex"]?.skillAvailable));
+      if (!localStorage.getItem(AI_SETTINGS_KEY) && health.defaultProvider && nextProviders[health.defaultProvider]?.available) {
+        const provider = health.defaultProvider;
+        const models = nextProviders[provider]?.models;
+        setAISettings((previous) => ({
+          ...previous,
+          provider,
+          translationModel: models?.translation || previous.translationModel,
+          chatModel: models?.chat || previous.chatModel,
+        }));
+      }
       setBridgeStatus("ready");
       return true;
     } catch {

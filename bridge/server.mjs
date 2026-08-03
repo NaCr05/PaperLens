@@ -406,6 +406,13 @@ function providerHealth() {
   };
 }
 
+function defaultProvider() {
+  if (codexAvailable) return "local-codex";
+  if (mimoProvider.configured) return "mimo";
+  if (openAIProvider.configured) return "openai";
+  return "local-codex";
+}
+
 function normalizeModel(value, fallback, allowedModels) {
   const candidate = compact(value, 80);
   return allowedModels.includes(candidate) ? candidate : fallback;
@@ -451,7 +458,7 @@ const server = createServer(async (request, response) => {
     sendJson(response, 200, {
       ok: true,
       service: "PaperLens AI bridge",
-      defaultProvider: "local-codex",
+      defaultProvider: defaultProvider(),
       providers: providerHealth(),
       documentConversion: {
         available: documentConverter.available,
