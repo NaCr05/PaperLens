@@ -15,7 +15,7 @@ PaperLens 希望把“阅读原文、查看译文、理解概念、引用图表�
 - **精确上下文选择**：单击引用整段，拖选则只引用实际选中的文字和行。
 - **公式渲染与解释**：译文和 AI Chat 均使用 KaTeX；无法可靠恢复的 PDF 公式会提示以左侧原文为准，不猜测残缺公式。
 - **图片与图表上下文**：自动检测带 Figure/Fig. 图注的图片区域，点击即可截取整图加入 AI Chat；聊天输入框也支持 `Command-V` 粘贴截图。
-- **可选 AI Provider**：在界面中切换本机 Codex、Xiaomi MiMo 和 OpenAI，并分别选择翻译/问答模型。
+- **可选 AI Provider**：在界面中切换本机 Codex、腾讯 CloudBase 混元、Xiaomi MiMo 和 OpenAI，并分别选择翻译/问答模型。
 - **资料上下文问答**：当前 Provider 结合页面、选区、图片和最近对话回答，并显示实际路由、模型、耗时与 token 用量。
 - **跨资料 `@` 引用**：在 AI Chat 输入 `@` 搜索“我的空间”；资料标题、原始文件名和可用的仓库名都可以作为检索入口，发送时仅读取与问题最相关的页面。
 - **论文仓库核实模式**：当论文或课程材料中检测到代码仓库后，代码实现类问题会要求核实 GitHub、alphaXiv 或实时来源，避免按经验臆测接口。
@@ -34,9 +34,11 @@ flowchart LR
   UI --> Proxy["同源 /api/codex 代理"]
   Proxy --> Bridge["127.0.0.1:43123 本机 bridge"]
   Bridge --> Codex["已登录的 Codex CLI"]
+  Bridge --> Hunyuan["CloudBase 混元 hy3"]
   Bridge --> MiMo["Xiaomi MiMo Chat Completions"]
   Bridge --> OpenAI["OpenAI Responses API"]
   Codex --> UI
+  Hunyuan --> UI
   MiMo --> UI
   OpenAI --> UI
 ```
@@ -49,7 +51,7 @@ PaperLens 是 **local-first**，但不是完全离线工具：PDF 由浏览器�
 - Node.js `>= 22.13.0`
 - npm
 - LibreOffice（导入 Word/PowerPoint 时需要；只阅读 PDF 时可选）
-- 已安装并登录的 [Codex CLI](https://developers.openai.com/codex/cli/)，或有效的 MiMo / OpenAI API Key
+- 已安装并登录的 [Codex CLI](https://developers.openai.com/codex/cli/)，或有效的 CloudBase / MiMo / OpenAI API Key
 - 推荐安装全局 `paper-reader` Skill，用于约束翻译、解释和仓库核实行为
 
 检查环境：
@@ -92,6 +94,13 @@ npm run bridge
 编辑不会被 Git 跟踪的 `.env`：
 
 ```dotenv
+# 腾讯 CloudBase 混元（仅放在服务端）
+CLOUDBASE_ENV_ID=
+CLOUDBASE_APIKEY=
+PAPERLENS_HUNYUAN_PROVIDER=hunyuan-v3
+PAPERLENS_HUNYUAN_TRANSLATION_MODEL=hy3
+PAPERLENS_HUNYUAN_CHAT_MODEL=hy3
+
 # Xiaomi MiMo（OpenAI 兼容的 Chat Completions 协议）
 MIMO_API_KEY=
 MIMO_BASE_URL=https://api.xiaomimimo.com/v1
@@ -105,7 +114,7 @@ PAPERLENS_OPENAI_CHAT_MODEL=gpt-5.6-terra
 PAPERLENS_OPENAI_REASONING_EFFORT=low
 ```
 
-重启 `npm run dev` 后，在右上角“AI 服务设置”中选择 Provider、模型并点击“测试当前服务”。翻译使用结构化 JSON 输出；MiMo 的图片问答使用 `mimo-v2.5` 全模态模型。代码实现或仓库核实问题即使选择 API Provider，也会在本机 Codex 可用时自动回退到 Codex。
+重启 `npm run dev` 后，在右上角“AI 服务设置”中选择 Provider、模型并点击“测试当前服务”。云端部署优先使用 CloudBase 的 `hunyuan-v3` Provider 组和 `hy3` 模型；混元暂时不可用、配额用尽或页面含图片时，服务会自动改用 MiMo，而不是只展示报错。代码实现或仓库核实问题在本机 Codex 可用时会回退到 Codex。
 
 ## 使用指南
 
@@ -161,6 +170,7 @@ bridge/
   server.mjs                # 回环 AI bridge、提示词、Provider 路由和 Codex 调用
   provider-routing.mjs      # 能力路由与仓库核实回退
   provider-errors.mjs       # 统一错误分类
+  providers/cloudbase-hunyuan.mjs # CloudBase Node SDK / 混元 hy3 Adapter
   providers/openai.mjs      # OpenAI Responses API Adapter
   providers/mimo.mjs        # Xiaomi MiMo Chat Completions Adapter
 scripts/
@@ -187,7 +197,7 @@ npm test
 - 跨行文字选区合并
 - 连续滚动的当前页判定与相邻页渲染窗口
 - GitHub 仓库地址提取
-- OpenAI / MiMo Provider 的本地 Mock 协议与错误重试
+- CloudBase 混元 / OpenAI / MiMo Provider 的本地 Mock 协议与错误重试
 - API 与本机 Codex 的能力路由和仓库核实回退
 - 页面、KaTeX、AI bridge、iPad gateway 和图片上下文的源码契约
 
