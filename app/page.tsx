@@ -745,7 +745,7 @@ function AISettingsModal({
           <RobotOutlined />
           <div>
             <strong>{status === "ready" ? `${selected?.label || "AI 服务"} 已就绪` : status === "checking" ? "正在检测…" : settings.provider === "cloudbase-hunyuan" ? "CloudBase 混元尚未配置" : settings.provider === "openai" ? "OpenAI API 尚未配置" : settings.provider === "mimo" ? "MiMo API 尚未配置" : "本机 AI 桥接未启动"}</strong>
-            <span>{status === "ready" ? settings.provider === "local-codex" ? `Paper Reader Skill ${skillAvailable ? "已安装" : "未检测到"}` : `翻译 ${settings.translationModel} · 问答 ${settings.chatModel}` : settings.provider === "cloudbase-hunyuan" ? "在 CloudRun 中配置 CloudBase API Key 后重启" : settings.provider === "openai" ? "在服务端 .env 中设置 OPENAI_API_KEY 后重启" : settings.provider === "mimo" ? "在服务端 .env 中设置 MIMO_API_KEY 后重启" : "请用 npm run dev 启动网页和桥接"}</span>
+            <span>{status === "ready" ? settings.provider === "local-codex" ? `Paper Reader Skill ${skillAvailable ? "已安装" : "未检测到"}` : `翻译 ${settings.translationModel} · 问答 ${settings.chatModel}` : settings.provider === "cloudbase-hunyuan" ? "在本机 .env 中设置 CLOUDBASE_ENV_ID 和 CLOUDBASE_APIKEY 后重启" : settings.provider === "openai" ? "在本机 .env 中设置 OPENAI_API_KEY 后重启" : settings.provider === "mimo" ? "在本机 .env 中设置 MIMO_API_KEY 后重启" : "请用 npm run dev 启动网页和桥接"}</span>
           </div>
         </div>
         {testStatus && <div className="provider-test-status" role="status">{testStatus}</div>}

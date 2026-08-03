@@ -1,4 +1,4 @@
-# PaperLens
+# PaperLens Local
 
 > 面向论文、课程 PPT、讲义和阅读材料的本地优先阅读与理解工作台：保留原文排版，同步翻译、提问、批注与笔记。
 
@@ -114,7 +114,9 @@ PAPERLENS_OPENAI_CHAT_MODEL=gpt-5.6-terra
 PAPERLENS_OPENAI_REASONING_EFFORT=low
 ```
 
-重启 `npm run dev` 后，在右上角“AI 服务设置”中选择 Provider、模型并点击“测试当前服务”。云端部署优先使用 CloudBase 的 `hunyuan-v3` Provider 组和 `hy3` 模型；混元暂时不可用、配额用尽或页面含图片时，服务会自动改用 MiMo，而不是只展示报错。代码实现或仓库核实问题在本机 Codex 可用时会回退到 Codex。
+重启 `npm run dev` 后，在右上角“AI 服务设置”中选择 Provider、模型并点击“测试当前服务”。混元暂时不可用、配额用尽或页面含图片时，服务会自动改用 MiMo，而不是只展示报错。代码实现或仓库核实问题在本机 Codex 可用时会回退到 Codex。
+
+线上登录、余额、计费和 CloudBase 部署由独立的 [PaperLens-Cloud](https://github.com/Peter-cuhk/PaperLens-Cloud) 仓库维护；本仓库不包含线上发布入口。
 
 ## 使用指南
 
