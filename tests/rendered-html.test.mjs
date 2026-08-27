@@ -151,9 +151,13 @@ test("keeps local learning-material reading, direct Codex calls, scrolling, zoom
   assert.match(page, /getActivePaperMention/);
   assert.match(page, /searchMentionTargets/);
   assert.match(page, /loadReferencedPaperPages/);
-  assert.match(page, /rankPaperPages/);
+  assert.match(page, /loadReferencedPaperPages\(paper\.id\)\)\.filter\(\(page\) => page\.text\.trim\(\)\)/);
+  assert.match(page, /contextScope: "full"/);
   assert.match(page, /loadCurrentPaperPages/);
   assert.match(page, /buildWholeDocumentChatContext/);
+  assert.match(page, /针对整篇资料或选中内容提问/);
+  assert.match(page, /全部可提取文字页并保留页码/);
+  assert.match(page, /页 · 全文引用/);
   assert.match(page, /从我的空间引用资料/);
   assert.match(page, /Math\.min\(pdf\.numPages, 4\)/);
   assert.match(page, /GitHub repository discovery failed/);
@@ -236,7 +240,12 @@ test("keeps local learning-material reading, direct Codex calls, scrolling, zoom
   assert.match(page, /className="thumbnail-label"/);
   assert.match(page, /setChatContextKind\("paragraph"\)/);
   assert.match(page, /setChatContextKind\("selection"\)/);
-  assert.match(page, /单击引用整段，拖选则只引用选中文字/);
+  assert.match(page, /整篇资料已作为基础上下文/);
+  assert.match(page, /chatMessages\?: ChatMessage\[\]/);
+  assert.match(page, /setChatMessages\(existingStored\?\.chatMessages \|\| \[\]\)/);
+  assert.match(page, /chatMessages: existingStored\?\.chatMessages \|\| \[\]/);
+  assert.match(page, /updateStoredPaper\(paperId, \{ chatMessages: nextMessages, chatMessagesUpdatedAt: Date\.now\(\) \}\)/);
+  assert.match(page, /commitChatMessages\(\(previous\) => \[\.\.\.previous, userMessage\]\)/);
   assert.match(page, /onMouseMove=\{\(\) =>/);
   assert.doesNotMatch(page, /copyForCodex|openPaste|粘贴当前页译文/);
 
@@ -253,6 +262,9 @@ test("keeps local learning-material reading, direct Codex calls, scrolling, zoom
   assert.match(bridge, /referencedPaperContext/);
   assert.match(bridge, /读者通过 @ 从“我的空间”引用的其他资料/);
   assert.match(bridge, /必须明确写出资料名称和证据页码/);
+  assert.match(bridge, /paper\?\.contextScope === "full"/);
+  assert.match(bridge, /paper\.pages\.map/);
+  assert.doesNotMatch(bridge, /paper\.pages\.slice\(0, 3\)/);
   assert.match(bridge, /24 \* 1024 \* 1024/);
   assert.match(bridge, /"--sandbox", "read-only"/);
   assert.match(bridge, /GitHub MCP、alphaXiv/);

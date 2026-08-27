@@ -46,7 +46,7 @@ test("P1 persistence and async isolation contracts stay wired", async () => {
   assert.match(page, /const loadIsCurrent = \(\) => isCurrentDocumentGeneration\(loadGeneration, documentGenerationRef\.current\)/);
   assert.match(page, /chatAbortRef\.current\?\.abort\(\);[\s\S]{0,160}setIsChatting\(false\)/);
   assert.match(page, /const requestIsCurrent = \(\) => \([\s\S]{0,300}isCurrentDocumentGeneration\(requestGeneration, documentGenerationRef\.current\)/);
-  assert.match(page, /if \(!requestIsCurrent\(\)\) return;[\s\S]{0,120}setChatMessages/);
+  assert.match(page, /if \(!requestIsCurrent\(\)\) return;[\s\S]{0,120}commitChatMessages/);
   assert.match(page, /if \(chatAbortRef\.current === controller\) \{[\s\S]{0,180}setIsChatting\(false\)/);
 
   assert.match(page, /const \[chatPageSource, currentPaperPages\] = await Promise\.all/);

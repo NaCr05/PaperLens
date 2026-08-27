@@ -97,22 +97,30 @@ test("ranks pages related to the actual question while retaining overview contex
   assert.deepEqual(ranked.map((page) => page.pageNumber), [1, 8]);
 });
 
-test("builds current-paper chat context by searching the entire PDF", () => {
+test("builds current-paper chat context from every extractable page without a six-page cap", () => {
   const context = buildWholeDocumentChatContext("action tokenizer training", [
     { pageNumber: 1, text: "Native Video Action Pretraining abstract and overview" },
     { pageNumber: 2, text: "Related work" },
+    { pageNumber: 3, text: "Problem formulation" },
+    { pageNumber: 4, text: "Method overview" },
     { pageNumber: 5, text: "Current page discusses policy inputs" },
+    { pageNumber: 6, text: "Architecture" },
+    { pageNumber: 7, text: "Training setup" },
     { pageNumber: 8, text: "We train the action tokenizer with discrete tokens and a tokenizer objective" },
+    { pageNumber: 9, text: "Evaluation protocol" },
+    { pageNumber: 10, text: "Main results" },
     { pageNumber: 11, text: "Action tokenizer training ablations and results" },
     { pageNumber: 12, text: "" },
-  ], 5, "Current page discusses policy inputs", 12, 3);
+  ], 5, "Current page discusses policy inputs", 12);
 
-  assert.equal(context.indexedPages, 5);
+  assert.equal(context.indexedPages, 11);
   assert.equal(context.totalPages, 12);
-  assert.equal(context.contextPageNumbers[0], 5);
+  assert.deepEqual(context.contextPageNumbers, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
   assert.equal(context.contextPageNumbers.filter((page) => page === 5).length, 1);
-  assert.ok(context.contextPageNumbers.includes(8));
-  assert.ok(context.contextPageNumbers.includes(11));
-  assert.match(context.text, /已检索整篇 PDF 中 5\/12 个具有可提取文字的页面/);
-  assert.match(context.text, /整篇 PDF 检索证据，第 8 页/);
+  assert.equal(context.documentPages.length, 11);
+  assert.equal(context.relatedPages.length, 10);
+  assert.match(context.text, /已提供整篇 PDF 中 11\/12 个具有可提取文字的页面全文/);
+  assert.match(context.text, /全文引用，第 1 页/);
+  assert.match(context.text, /全文引用，第 11 页/);
+  assert.doesNotMatch(context.text, /最相关的其他证据页/);
 });

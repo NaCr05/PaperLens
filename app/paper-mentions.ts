@@ -23,6 +23,7 @@ export type PaperPageText = { pageNumber: number; text: string };
 export type WholeDocumentChatContext = {
   text: string;
   contextPageNumbers: number[];
+  documentPages: PaperPageText[];
   relatedPages: PaperPageText[];
   indexedPages: number;
   totalPages: number;
@@ -247,31 +248,35 @@ export function rankPaperPages(question: string, pages: PaperPageText[], limit =
 }
 
 export function buildWholeDocumentChatContext(
-  question: string,
+  _question: string,
   pages: PaperPageText[],
   currentPage: number,
   currentPageText: string,
   totalPages: number,
-  maxRelatedPages = 5,
 ): WholeDocumentChatContext {
-  const indexedPages = pages.filter((page) => page.text.trim()).length;
-  const relatedPages = rankPaperPages(
-    question,
-    pages.filter((page) => page.pageNumber !== currentPage),
-    maxRelatedPages,
-  );
-  const currentText = currentPageText.trim().slice(0, 12_000);
-  const relatedText = relatedPages.map((page) => (
-    `[整篇 PDF 检索证据，第 ${page.pageNumber} 页]\n${page.text.trim().slice(0, 2_800)}`
+  const pagesByNumber = new Map<number, string>();
+  pages.forEach((page) => {
+    const text = page.text.trim();
+    if (Number.isInteger(page.pageNumber) && page.pageNumber > 0 && text) pagesByNumber.set(page.pageNumber, text);
+  });
+  const currentText = currentPageText.trim();
+  if (currentText) pagesByNumber.set(currentPage, currentText);
+  const documentPages = [...pagesByNumber]
+    .sort(([left], [right]) => left - right)
+    .map(([pageNumber, text]) => ({ pageNumber, text }));
+  const indexedPages = documentPages.length;
+  const relatedPages = documentPages.filter((page) => page.pageNumber !== currentPage);
+  const coverage = `已提供整篇 PDF 中 ${indexedPages}/${Math.max(totalPages, indexedPages)} 个具有可提取文字的页面全文`;
+  const documentText = documentPages.map((page) => (
+    `[全文引用，第 ${page.pageNumber} 页]\n${page.text}`
   )).join("\n\n");
-  const coverage = `已检索整篇 PDF 中 ${indexedPages}/${Math.max(totalPages, indexedPages)} 个具有可提取文字的页面`;
   return {
     text: [
-      `[当前阅读页，第 ${currentPage} 页]\n${currentText}`,
-      `[整篇 PDF 检索说明]\n${coverage}；以下是与当前问题最相关的其他证据页。回答必须注明证据页码；未提供的页面内容不得猜测。`,
-      relatedText,
+      `[整篇 PDF 全文引用说明]\n${coverage}，没有再按相关性截成固定页数。回答必须逐项注明证据页码；没有可提取文字或没有提供视觉内容的页面不得猜测。`,
+      documentText,
     ].filter(Boolean).join("\n\n"),
-    contextPageNumbers: [currentPage, ...relatedPages.map((page) => page.pageNumber)],
+    contextPageNumbers: documentPages.map((page) => page.pageNumber),
+    documentPages,
     relatedPages,
     indexedPages,
     totalPages,

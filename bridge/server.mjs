@@ -142,9 +142,10 @@ function referencedPaperContext(payload) {
         aliases: Array.isArray(paper?.aliases) ? paper.aliases.slice(0, 8).map((alias) => compact(alias, 160)).filter(Boolean) : [],
         folderNames: Array.isArray(paper?.folderNames) ? paper.folderNames.slice(0, 3).map((name) => compact(name, 100)).filter(Boolean) : [],
         repositoryUrl: compact(paper?.repositoryUrl, 500),
-        pages: Array.isArray(paper?.pages) ? paper.pages.slice(0, 3).map((page) => ({
+        contextScope: paper?.contextScope === "full" ? "full" : "retrieved",
+        pages: Array.isArray(paper?.pages) ? paper.pages.map((page) => ({
           pageNumber: Number.isInteger(page?.pageNumber) ? page.pageNumber : null,
-          text: compact(page?.text, 7_000),
+          text: typeof page?.text === "string" ? page.text.trim() : "",
         })).filter((page) => page.pageNumber && page.text) : [],
       }))
     : [];
@@ -179,7 +180,8 @@ async function materializeImages(payload) {
 
 function buildPrompt(payload) {
   const mode = payload.mode;
-  const pageText = compact(payload.pageText, 28_000);
+  const rawPageText = typeof payload.pageText === "string" ? payload.pageText.trim() : "";
+  const pageText = mode === "translate" || mode === "terms" ? rawPageText.slice(0, 28_000) : rawPageText;
   const selectedText = compact(payload.selectedText, 6_000);
   const question = compact(payload.question, 4_000);
   const paperTitle = compact(payload.paperTitle, 300);
@@ -251,7 +253,7 @@ function buildPrompt(payload) {
     "公式输出规则：回答中的每一个数学公式都必须写成有效 LaTeX；行内公式使用 \\( ... \\)，独立公式使用 \\[ ... \\]。不要在分隔符外裸露下划线、花括号或 \\prod、\\sum 等 LaTeX 命令，也不要把公式放进 Markdown 代码围栏。对公式的解释要说明它表达的关系、主要变量以及上下标或求和/乘积范围；当前上下文没有定义的符号要明确指出，禁止猜测。",
     repairError ? `上一次 AI 任务失败：${repairError}。请诊断原因，修复后完成用户原始任务，不要只复述错误。` : "",
     `资料：${paperTitle || "本地资料"}`,
-    pageText ? `当前页内容：\n${pageText}` : "",
+    pageText ? `当前资料上下文（可能包含按页标注的全文）：\n${pageText}` : "",
     selectedText ? `读者选中的重点段落：\n${selectedText}` : "",
     attachedImages.length ? `图片上下文：\n${attachedImages.map((image, index) => `${index + 1}. ${image.label}（${image.source}${image.pageNumber ? `，资料第 ${image.pageNumber} 页` : ""}）`).join("\n")}` : "",
     attachedImages.length ? "请实际查看随请求附带的图片，并将图中的架构、模块、箭头、图例和文字与页面文本结合起来回答。明确区分图片中可见事实与自己的解释；看不清的部分直接说明，不得根据常识补画或猜测。" : "",
@@ -261,9 +263,10 @@ function buildPrompt(payload) {
       paper.folderNames.length ? `来源文件夹：${paper.folderNames.join("、")}` : "",
       paper.aliases.length ? `别名：${paper.aliases.join("、")}` : "",
       paper.repositoryUrl ? `仓库：${paper.repositoryUrl}` : "",
+      paper.contextScope === "full" ? `上下文范围：全文（${paper.pages.length} 个可提取文字页）` : `上下文范围：按问题检索的证据页（${paper.pages.length} 页）`,
       ...paper.pages.map((page) => `[${paper.title}，第 ${page.pageNumber} 页]\n${page.text}`),
     ].filter(Boolean).join("\n")).join("\n\n")}` : "",
-    referencedPapers.length ? "回答涉及被引用资料时，必须明确写出资料名称和证据页码；比较多份资料时分别说明证据，不得把一份资料的内容归到另一份。若资料来自被 @ 的文件夹，说明当前回答实际采用了其中哪些资料。这里提供的是从所选资料或整个文件夹中按问题检索出的相关页面，不代表完整全文；证据不足时应明确说明。" : "",
+    referencedPapers.length ? "回答涉及被引用资料时，必须明确写出资料名称和证据页码；比较多份资料时分别说明证据，不得把一份资料的内容归到另一份。明确 @ 的单篇资料提供所有可提取文字页，不得再假定只有少量候选页；文件夹引用仍是按问题检索出的证据页。若资料来自被 @ 的文件夹，说明当前回答实际采用了其中哪些资料；证据不足时应明确说明。" : "",
     history ? `最近对话：\n${history}` : "",
   ].filter(Boolean);
 

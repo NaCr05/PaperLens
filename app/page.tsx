@@ -50,7 +50,6 @@ import {
   getActivePaperMention,
   inferPaperTitle,
   isLowSignalPaperName,
-  rankPaperPages,
   rankFolderPaperContexts,
   removeMentionQuery,
   repositoryAlias,
@@ -199,6 +198,8 @@ type LibraryPaper = {
 type LibraryFolder = { id: string; name: string; createdAt: number; updatedAt: number };
 type StoredPaper = LibraryPaper & {
   file: Blob;
+  chatMessages?: ChatMessage[];
+  chatMessagesUpdatedAt?: number;
   highlights?: Record<number, HighlightRect[]>;
   highlightsUpdatedAt?: number;
   translations?: Record<number, TranslatedSegment[]>;
@@ -1231,6 +1232,7 @@ export default function Home() {
   const chatAbortRef = useRef<AbortController | null>(null);
   const noteSaveQueueRef = useRef<Promise<void>>(Promise.resolve());
   const highlightSaveQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const chatSaveQueueRef = useRef<Promise<void>>(Promise.resolve());
   const paperWriteBarrierRef = useRef(new Map<string, Promise<void>>());
   const highlightsRef = useRef<Record<number, HighlightRect[]>>({});
   const progressThumbnailTokenRef = useRef(0);
@@ -1904,7 +1906,7 @@ export default function Home() {
       setHighlights(restoredHighlights);
       setComments(existingStored?.comments || []);
       setCommentEditor(null);
-      setChatMessages([]);
+      setChatMessages(existingStored?.chatMessages || []);
       setChatImages([]);
       setChatPaperMentions([]);
       setChatFolderMentions([]);
@@ -1955,6 +1957,8 @@ export default function Home() {
             thumbnailPage: initialPage,
             folderId: existingStored?.folderId || options.folderId,
             file: new Blob([fileBuffer], { type: "application/pdf" }),
+            chatMessages: existingStored?.chatMessages || [],
+            chatMessagesUpdatedAt: existingStored?.chatMessagesUpdatedAt,
             highlights: restoredHighlights,
             highlightsUpdatedAt: existingStored?.highlightsUpdatedAt,
             translations: restoredTranslations,
@@ -2000,6 +2004,7 @@ export default function Home() {
   const openLibraryPaper = useCallback(async (paper: LibraryPaper) => {
     const openGeneration = ++documentGenerationRef.current;
     const pendingHighlightWrites = highlightSaveQueueRef.current;
+    const pendingChatWrites = chatSaveQueueRef.current;
     chatAbortRef.current?.abort();
     chatAbortRef.current = null;
     translationAbortRef.current?.abort();
@@ -2009,6 +2014,7 @@ export default function Home() {
     setOpeningPaperId(paper.id);
     try {
       await pendingHighlightWrites.catch(() => undefined);
+      await pendingChatWrites.catch(() => undefined);
       if (!isCurrentDocumentGeneration(openGeneration, documentGenerationRef.current)) return;
       const stored = await getStoredPaper(paper.id);
       if (!isCurrentDocumentGeneration(openGeneration, documentGenerationRef.current)) return;
@@ -2067,6 +2073,7 @@ export default function Home() {
         setPaperTerms({});
         setComments([]);
         setCommentEditor(null);
+        setChatMessages([]);
       }
       await refreshLibrary();
       setMessage(`已删除《${paper.displayName}》及其全部批注`);
@@ -2179,6 +2186,27 @@ export default function Home() {
         if (currentPaperIdRef.current === paperId) setMessage("标亮已更新，但暂时无法保存到本机资料库");
       });
   }, []);
+
+  const persistChatMessages = useCallback((paperId: string, nextMessages: ChatMessage[]) => {
+    if (!paperId) return;
+    const paperWriteBarrier = paperWriteBarrierRef.current.get(paperId) || Promise.resolve();
+    chatSaveQueueRef.current = chatSaveQueueRef.current
+      .catch(() => undefined)
+      .then(() => paperWriteBarrier)
+      .then(() => updateStoredPaper(paperId, { chatMessages: nextMessages, chatMessagesUpdatedAt: Date.now() }))
+      .catch((error) => {
+        console.error("AI Chat persistence failed", error);
+        if (currentPaperIdRef.current === paperId) setMessage("对话仍在当前页面，但暂时无法保存到本机资料库");
+      });
+  }, []);
+
+  const commitChatMessages = useCallback((update: (previous: ChatMessage[]) => ChatMessage[]) => {
+    setChatMessages((previous) => {
+      const next = update(previous);
+      persistChatMessages(currentPaperIdRef.current, next);
+      return next;
+    });
+  }, [persistChatMessages]);
 
   const commitHighlights = useCallback((nextHighlights: Record<number, HighlightRect[]>) => {
     highlightsRef.current = nextHighlights;
@@ -2898,7 +2926,7 @@ export default function Home() {
       return;
     }
     const typedQuestion = (preset || chatInput).trim();
-    const question = typedQuestion || (chatImages.length ? "请解释这些图片展示的结构、信息流，以及它们与当前页方法的关系。" : "");
+    const question = typedQuestion || (chatImages.length ? "请解释这些图片展示的结构、信息流，以及它们与整篇资料方法的关系。" : "");
     if (!question || isChatting) return;
     if (!aiTaskProviderAvailable) {
       setShowConnect(true);
@@ -2922,7 +2950,7 @@ export default function Home() {
       folderLabels: chatFolderMentions.map((folder) => folder.name),
     };
     const history = chatMessages.map(({ role, text }) => ({ role, text }));
-    setChatMessages((previous) => [...previous, userMessage]);
+    commitChatMessages((previous) => [...previous, userMessage]);
     setChatInput("");
     setChatOpen(true);
     setIsChatting(true);
@@ -2940,18 +2968,17 @@ export default function Home() {
         chatPageSource.text,
         pdfRef.current?.numPages || currentPaperPages.length,
       );
-      setChatStatus(`已检索整篇 PDF，正在结合第 ${wholeDocumentContext.contextPageNumbers.join("、")} 页回答…`);
+      setChatStatus(`已载入全文 ${wholeDocumentContext.indexedPages}/${wholeDocumentContext.totalPages} 个可提取文字页，正在回答…`);
       if (chatPageSource.images.length) {
-        setChatMessages((previous) => previous.map((message) => message.id === userMessage.id
+        commitChatMessages((previous) => previous.map((message) => message.id === userMessage.id
           ? { ...message, imageLabels: [...(message.imageLabels || []), ...chatPageSource.images.map((image) => image.label)] }
           : message));
       }
-      const explicitPageLimit = chatFolderMentions.length ? 2 : 3;
       const explicitReferencedPapers = await Promise.all(chatPaperMentions.map(async (paper) => {
         const stored = await getStoredPaper(paper.id);
         if (!requestIsCurrent()) throw new DOMException("Aborted", "AbortError");
         if (!stored) throw new Error(`《${paper.displayName}》已不在我的空间中`);
-        const pages = rankPaperPages(`${question} ${paper.displayName} ${(paper.aliases || []).join(" ")}`, await loadReferencedPaperPages(paper.id), explicitPageLimit);
+        const pages = (await loadReferencedPaperPages(paper.id)).filter((page) => page.text.trim());
         if (!requestIsCurrent()) throw new DOMException("Aborted", "AbortError");
         return {
           id: paper.id,
@@ -2962,6 +2989,7 @@ export default function Home() {
           repositoryUrl: stored.repositoryUrl || paper.repositoryUrl || "",
           lastOpenedAt: stored.lastOpenedAt,
           folderNames: [] as string[],
+          contextScope: "full" as const,
           pages,
         };
       }));
@@ -2988,6 +3016,7 @@ export default function Home() {
           repositoryUrl: stored.repositoryUrl || "",
           lastOpenedAt: stored.lastOpenedAt,
           folderNames,
+          contextScope: "retrieved" as const,
           pages,
         });
       }
@@ -3020,7 +3049,7 @@ export default function Home() {
       });
       const result = recovery.value;
       if (!requestIsCurrent()) return;
-      setChatMessages((previous) => [...previous, {
+      commitChatMessages((previous) => [...previous, {
         id: `assistant-${Date.now()}`,
         role: "assistant",
         text: result.answer,
@@ -3034,7 +3063,7 @@ export default function Home() {
       }]);
     } catch (error) {
       if (requestIsCurrent() && !isAbortError(error)) {
-        setChatMessages((previous) => [...previous, { id: `assistant-error-${Date.now()}`, role: "assistant", text: `暂时没有得到可靠回答：${error instanceof Error ? error.message : "AI 服务调用失败"}` }]);
+        commitChatMessages((previous) => [...previous, { id: `assistant-error-${Date.now()}`, role: "assistant", text: `暂时没有得到可靠回答：${error instanceof Error ? error.message : "AI 服务调用失败"}` }]);
       }
     } finally {
       if (chatAbortRef.current === controller) {
@@ -3683,14 +3712,14 @@ export default function Home() {
           {chatOpen && (
             <div className="chat-drawer-body">
               <div className="chat-context-row">
-                {selectedText ? <button className="context-chip" title={selectedText} onClick={clearChatContext}><span>{chatContextKind === "paragraph" ? "整段" : "选区"}</span>{selectedText.slice(0, 54)}<CloseCircleOutlined /></button> : <span className="context-hint">单击引用整段，拖选则只引用选中文字</span>}
+                {selectedText ? <button className="context-chip" title={selectedText} onClick={clearChatContext}><span>{chatContextKind === "paragraph" ? "整段" : "选区"}</span>{selectedText.slice(0, 54)}<CloseCircleOutlined /></button> : <span className="context-hint">整篇资料已作为基础上下文；单击可重点引用整段，拖选则引用选中文字</span>}
                 {repositoryUrl && <a className="repo-chip active connected" href={repositoryUrl} target="_blank" rel="noreferrer" title={`在 GitHub 打开 ${repositoryName(repositoryUrl)}`} aria-label={`在 GitHub 打开仓库 ${repositoryName(repositoryUrl)}`}><GithubOutlined /><strong>{repositoryName(repositoryUrl)}</strong><i>按问题动态核实</i><ExportOutlined /></a>}
               </div>
               <div className="chat-messages">
                 {!chatMessages.length ? (
                   <div className="chat-empty">
-                    <strong>针对当前页或选中内容提问</strong>
-                    <span>回答由当前选择的 AI 服务生成；代码实现问题会回退到本机 Codex 核实仓库。</span>
+                    <strong>针对整篇资料或选中内容提问</strong>
+                    <span>默认引用全部可提取文字页并保留页码；代码实现问题会回退到本机 Codex 核实仓库。</span>
                     <div>
                       <button onClick={() => void sendChat("用直觉解释选中的这段内容")}>直觉解释</button>
                       <button onClick={() => void sendChat("这段内容在整份资料里起什么作用？")}>内容位置</button>
@@ -3698,7 +3727,7 @@ export default function Home() {
                     </div>
                   </div>
                 ) : chatMessages.map((item) => <div key={item.id} className={`chat-message ${item.role}`}><span>{item.role === "assistant" ? <RobotOutlined /> : "你"}</span><div>{item.role === "assistant" ? <ChatMarkdown text={item.text} /> : <p>{item.text}</p>}{item.folderLabels?.length ? <small className="message-folders"><FolderOutlined /> {item.folderLabels.join("、")}</small> : null}{item.paperLabels?.length ? <small className="message-papers"><FilePdfOutlined /> {item.paperLabels.join("、")}</small> : null}{item.imageLabels?.length ? <small className="message-images"><PictureOutlined /> {item.imageLabels.join("、")}</small> : null}{item.role === "assistant" && item.repositoryUsed !== undefined ? <small className={`message-repository ${item.repositoryUsed ? "verified" : "skipped"}`}><GithubOutlined /> {item.repositoryUsed ? `已核实 ${item.repositoryName}` : "本次无需读取仓库"}</small> : null}{item.role === "assistant" && (item.providerLabel || item.usage) ? <small className="message-provider">{item.fallbackReason ? `${item.fallbackReason} · ` : ""}{item.providerLabel}{item.usage ? ` · ${usageSummary(item.usage)}` : ""}{item.latencyMs ? ` · ${(item.latencyMs / 1000).toFixed(1)}s` : ""}</small> : null}</div></div>)}
-                {isChatting && <div className="chat-message assistant loading"><span><RobotOutlined /></span><p>{chatStatus || (chatFolderMentions.length ? `${selectedProviderLabel} 正在检索文件夹中的相关资料与证据页…` : repositoryUrl || chatPaperMentions.some((paper) => paper.repositoryUrl) ? `${selectedProviderLabel} 正在检索引用资料并判断是否需要核实仓库…` : chatPaperMentions.length ? `${selectedProviderLabel} 正在检索引用资料的相关页面…` : `${selectedProviderLabel} 正在阅读上下文…`)}</p></div>}
+                {isChatting && <div className="chat-message assistant loading"><span><RobotOutlined /></span><p>{chatStatus || (chatFolderMentions.length ? `${selectedProviderLabel} 正在检索文件夹中的相关资料与证据页…` : repositoryUrl || chatPaperMentions.some((paper) => paper.repositoryUrl) ? `${selectedProviderLabel} 正在载入引用资料全文并判断是否需要核实仓库…` : chatPaperMentions.length ? `${selectedProviderLabel} 正在载入引用资料全文…` : `${selectedProviderLabel} 正在阅读全文上下文…`)}</p></div>}
               </div>
               <div className="chat-composer">
                 {mentionRange && (
@@ -3711,7 +3740,7 @@ export default function Home() {
                         : (() => {
                             const paper = suggestion.record;
                             const aliases = buildPaperAliases([...(paper.aliases || []), paper.sourceFileName || paper.fileName, repositoryAlias(paper.repositoryUrl || "")]).filter((alias) => alias !== paper.displayName).slice(0, 3);
-                            return aliases.length ? `也可通过 ${aliases.join(" · ")} 找到` : `${paper.pageCount} 页 · 最近阅读`;
+                            return aliases.length ? `${paper.pageCount} 页 · 全文引用 · 也可通过 ${aliases.join(" · ")} 找到` : `${paper.pageCount} 页 · 全文引用`;
                           })();
                       return (
                         <button
@@ -3766,7 +3795,7 @@ export default function Home() {
                   </div>
                 )}
                 <div className="chat-composer-row">
-                  <textarea ref={chatInputRef} value={chatInput} onChange={handleChatInputChange} onPaste={handleChatPaste} onKeyDown={handleChatInputKeyDown} placeholder={chatImages.length ? "询问图片；输入 @ 还可引用资料或文件夹…" : repositoryUrl ? "问当前资料或代码实现；输入 @ 引用资料或文件夹…" : "问当前页；输入 @ 引用资料或文件夹…"} />
+                  <textarea ref={chatInputRef} value={chatInput} onChange={handleChatInputChange} onPaste={handleChatPaste} onKeyDown={handleChatInputKeyDown} placeholder={chatImages.length ? "询问图片；输入 @ 还可引用其他资料或文件夹…" : repositoryUrl ? "问整篇资料或代码实现；输入 @ 引用其他资料或文件夹…" : "问整篇资料；输入 @ 引用其他资料或文件夹…"} />
                   <button disabled={!isChatting && !chatInput.trim() && !chatImages.length} onClick={() => void sendChat()} aria-label={isChatting ? "停止生成" : "发送问题"}>{isChatting ? <CloseOutlined /> : <SendOutlined />}</button>
                 </div>
               </div>
