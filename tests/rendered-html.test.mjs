@@ -126,7 +126,7 @@ test("keeps local learning-material reading, direct Codex calls, scrolling, zoom
   assert.match(bridge, /不要只复述错误/);
   assert.match(page, /renderPdfPageForVision/);
   assert.match(page, /shouldUseVisualPageTranslation/);
-  assert.match(page, /visualPage \? <ChatMarkdown text=\{segment\.translation\} \/>/);
+  assert.match(page, /visualPage \? <ChatMarkdown text=\{recoverTranslationNewlines\(segment\.translation\)\} \/>/);
   assert.match(page, /visualPage: source\.visualOnly/);
   assert.match(page, /第 \$\{sourcePage\} 页没有文字层，正在生成整页图片/);
   assert.match(page, /翻译全文/);
