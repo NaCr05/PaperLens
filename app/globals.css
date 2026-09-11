@@ -275,6 +275,19 @@ body.panel-resizing * { cursor: col-resize !important; }
 body.chat-resizing { cursor: row-resize !important; user-select: none; }
 body.chat-resizing * { cursor: row-resize !important; }
 .chat-drawer-header { height: 40px; display: flex; align-items: center; background: #fff; }
+.inline-model-picker { display: inline-flex; align-items: center; gap: 7px; min-width: 0; color: #787180; font-size: 10px; }
+.inline-model-picker > span { white-space: nowrap; }
+.inline-model-picker select { min-width: 0; width: 156px; max-width: 100%; height: 28px; padding: 0 6px; border: 1px solid #ded7ea; border-radius: 6px; background: #faf8fd; color: #65439b; font: inherit; cursor: pointer; text-overflow: ellipsis; }
+.inline-model-picker select:focus-visible { outline: 2px solid var(--purple); outline-offset: 2px; }
+.inline-model-picker select:disabled { opacity: .55; cursor: default; }
+.inline-model-controls { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; min-width: 0; }
+.inline-model-controls > .inline-model-picker:first-child { flex: 1; }
+.inline-model-controls > .inline-model-picker:first-child select { flex: 1; }
+.inline-model-controls .effort-picker select { flex: none; width: 72px; }
+.chat-model-row { padding: 7px 14px; border-bottom: 1px solid #ece8f4; flex: 0 0 auto; }
+.translation-model-row { flex: 0 0 auto; padding: 8px 14px; border-bottom: 1px solid #ece8f4; background: #fff; }
+.translation-model-row .inline-model-picker { display: flex; }
+.translation-model-row select { flex: 1; width: auto; }
 .chat-drawer-toggle { width: auto; min-width: 0; height: 40px; flex: 1; display: flex; align-items: center; gap: 12px; padding: 0 10px 0 14px; border: 0; background: #fff; color: #57525d; cursor: pointer; text-align: left; }
 .chat-drawer-toggle > span:first-child { display: inline-flex; align-items: center; gap: 7px; color: #39353e; font-size: 12px; font-weight: 650; }
 .chat-drawer-toggle > span:first-child .anticon { color: var(--purple); }
@@ -294,7 +307,7 @@ body.chat-resizing * { cursor: row-resize !important; }
 .collapsed-repo > .anticon:last-child { flex: 0 0 auto; font-size: 8px; }
 .drawer-arrow { margin-left: auto; color: #aaa5ae; font-size: 10px; transition: transform .18s ease; }
 .ai-chat-drawer.open .drawer-arrow { transform: rotate(180deg); }
-.chat-drawer-body { height: calc(100% - 40px); display: grid; grid-template-rows: 38px minmax(0,1fr) auto; border-top: 1px solid #f0edf3; background: #fcfbfd; }
+.chat-drawer-body { height: calc(100% - 40px); display: grid; grid-template-rows: auto 38px minmax(0,1fr) auto; border-top: 1px solid #f0edf3; background: #fcfbfd; }
 .chat-context-row { min-width: 0; display: flex; align-items: center; gap: 7px; padding: 6px 12px; border-bottom: 1px solid #efecf2; overflow: hidden; }
 .context-chip, .repo-chip { height: 26px; min-width: 0; display: inline-flex; align-items: center; gap: 6px; border: 1px solid #ddd7e7; border-radius: 13px; padding: 0 9px; background: white; color: #665f6d; cursor: pointer; font-size: 9px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .context-chip { max-width: 52%; }
@@ -410,6 +423,7 @@ body.chat-resizing * { cursor: row-resize !important; }
 .full-translation-progress.complete strong { color: #43865a; }
 .translation-content { flex: 1; min-height: 0; overflow-y: auto; padding: 18px 24px 78px; scrollbar-width: thin; scrollbar-color: #d7ceeb transparent; }
 .translated-article { max-width: 720px; margin: 0 auto; color: #343138; font-family: var(--font-noto-serif-sc), "Songti SC", serif; }
+.translated-article .chat-markdown { border: 0; border-radius: 0; padding: 0; background: transparent; }
 .article-kicker { color: #85808b; font: 12px/1.5 var(--font-geist-sans); margin-bottom: 13px; }
 .translated-article h3 { margin: 18px 0 8px; font-size: 15px; line-height: 1.55; font-weight: 700; }
 .translated-article p { white-space: pre-wrap; margin: 0 0 14px; font-size: 14px; line-height: 1.92; }
@@ -518,7 +532,7 @@ body.chat-resizing * { cursor: row-resize !important; }
 .provider-option strong { font-size: 11px; }
 .provider-option small { color: #908997; font-size: 9px; }
 .provider-option > i { color: #6f48cc; font-size: 11px; font-style: normal; }
-.ai-model-settings { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 9px; margin: 0 0 14px; }
+.ai-model-settings { display: grid; grid-template-columns: 1fr; gap: 9px; margin: 0 0 14px; }
 .ai-model-settings label { margin: 0; }
 .provider-test-status { margin-top: 9px; border-radius: 5px; padding: 7px 9px; background: #f4f1f8; color: #696270; font-size: 10px; line-height: 1.45; }
 

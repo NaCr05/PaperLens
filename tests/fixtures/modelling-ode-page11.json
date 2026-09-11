@@ -1,0 +1,368 @@
+{
+  "viewport": {
+    "width": 362.835,
+    "height": 272.126
+  },
+  "items": [
+    {
+      "str": "Modelling with ODE",
+      "transform": [
+        14.3462,
+        0,
+        0,
+        14.3462,
+        8.504,
+        252.065
+      ],
+      "width": 120.52099157999999,
+      "height": 14.3462,
+      "fontName": "g_d0_f1",
+      "hasEOL": false
+    },
+    {
+      "str": "Key idea in modelling with an ODE: identify how a quantity is",
+      "transform": [
+        10.9091,
+        0,
+        0,
+        10.9091,
+        28.345999999999997,
+        222.612
+      ],
+      "width": 285.09514667000013,
+      "height": 10.9091,
+      "fontName": "g_d0_f2",
+      "hasEOL": true
+    },
+    {
+      "str": "changing",
+      "transform": [
+        10.9091,
+        0,
+        0,
+        10.9091,
+        28.345999999999997,
+        209.063
+      ],
+      "width": 40.5163974,
+      "height": 10.9091,
+      "fontName": "g_d0_f2",
+      "hasEOL": false
+    },
+    {
+      "str": "What is it changing with respect to",
+      "transform": [
+        10.9091,
+        0,
+        0,
+        10.9091,
+        50.165,
+        192.525
+      ],
+      "width": 162.15395331000008,
+      "height": 10.9091,
+      "fontName": "g_d0_f2",
+      "hasEOL": false
+    },
+    {
+      "str": "How can you quantify that change",
+      "transform": [
+        10.9091,
+        0,
+        0,
+        10.9091,
+        50.165,
+        175.987
+      ],
+      "width": 157.54704038000003,
+      "height": 10.9091,
+      "fontName": "g_d0_f2",
+      "hasEOL": false
+    },
+    {
+      "str": "dy",
+      "transform": [
+        10.9091,
+        0,
+        0,
+        10.9091,
+        105.22399999999999,
+        105.612
+      ],
+      "width": 10.666917980000003,
+      "height": 10.9091,
+      "fontName": "g_d0_f3",
+      "hasEOL": true
+    },
+    {
+      "str": "dx",
+      "transform": [
+        10.9091,
+        0,
+        0,
+        10.9091,
+        105.315,
+        90.749
+      ],
+      "width": 10.666917980000003,
+      "height": 10.9091,
+      "fontName": "g_d0_f3",
+      "hasEOL": false
+    },
+    {
+      "str": "|{z}",
+      "transform": [
+        10.9091,
+        0,
+        0,
+        10.9091,
+        101.33,
+        86.451
+      ],
+      "width": 19.636380000000003,
+      "height": 10.9091,
+      "fontName": "g_d0_f4",
+      "hasEOL": false
+    },
+    {
+      "str": "represents how",
+      "transform": [
+        7.9701,
+        0,
+        0,
+        7.9701,
+        28.346000000000004,
+        76.109
+      ],
+      "width": 52.11249885000001,
+      "height": 7.9701,
+      "fontName": "g_d0_f5",
+      "hasEOL": false
+    },
+    {
+      "str": "y",
+      "transform": [
+        7.9701,
+        0,
+        0,
+        7.9701,
+        83.27991425000002,
+        76.109
+      ],
+      "width": 3.9021609600000007,
+      "height": 7.9701,
+      "fontName": "g_d0_f6",
+      "hasEOL": false
+    },
+    {
+      "str": "is changing with respect to",
+      "transform": [
+        7.9701,
+        0,
+        0,
+        7.9701,
+        90.88020161000003,
+        76.109
+      ],
+      "width": 95.61649269000002,
+      "height": 7.9701,
+      "fontName": "g_d0_f5",
+      "hasEOL": false
+    },
+    {
+      "str": "x",
+      "transform": [
+        7.9701,
+        0,
+        0,
+        7.9701,
+        189.3181097,
+        76.109
+      ],
+      "width": 3.9021609600000007,
+      "height": 7.9701,
+      "fontName": "g_d0_f6",
+      "hasEOL": false
+    },
+    {
+      "str": "=",
+      "transform": [
+        10.9091,
+        0,
+        0,
+        10.9091,
+        196.981,
+        98.232
+      ],
+      "width": 8.48509798,
+      "height": 10.9091,
+      "fontName": "g_d0_f2",
+      "hasEOL": false
+    },
+    {
+      "str": "f",
+      "transform": [
+        10.9091,
+        0,
+        0,
+        10.9091,
+        266.92796738,
+        98.232
+      ],
+      "width": 3.3338209600000006,
+      "height": 10.9091,
+      "fontName": "g_d0_f3",
+      "hasEOL": false
+    },
+    {
+      "str": "(",
+      "transform": [
+        10.9091,
+        0,
+        0,
+        10.9091,
+        272.62906304,
+        98.232
+      ],
+      "width": 4.24254899,
+      "height": 10.9091,
+      "fontName": "g_d0_f2",
+      "hasEOL": false
+    },
+    {
+      "str": "x",
+      "transform": [
+        10.9091,
+        0,
+        0,
+        10.9091,
+        276.87161203,
+        98.232
+      ],
+      "width": 5.030186010000001,
+      "height": 10.9091,
+      "fontName": "g_d0_f3",
+      "hasEOL": false
+    },
+    {
+      "str": ",",
+      "transform": [
+        10.9091,
+        0,
+        0,
+        10.9091,
+        282.89452614000004,
+        98.232
+      ],
+      "width": 3.0305479800000006,
+      "height": 10.9091,
+      "fontName": "g_d0_f7",
+      "hasEOL": false
+    },
+    {
+      "str": "y",
+      "transform": [
+        10.9091,
+        0,
+        0,
+        10.9091,
+        287.74689382,
+        98.232
+      ],
+      "width": 5.030186010000001,
+      "height": 10.9091,
+      "fontName": "g_d0_f3",
+      "hasEOL": false
+    },
+    {
+      "str": ")",
+      "transform": [
+        10.9091,
+        0,
+        0,
+        10.9091,
+        293.95526263000005,
+        98.232
+      ],
+      "width": 4.24254899,
+      "height": 10.9091,
+      "fontName": "g_d0_f2",
+      "hasEOL": false
+    },
+    {
+      "str": "| {z }",
+      "transform": [
+        10.9091,
+        0,
+        0,
+        10.9091,
+        266.923,
+        91.207
+      ],
+      "width": 31.278095000000036,
+      "height": 10.9091,
+      "fontName": "g_d0_f4",
+      "hasEOL": false
+    },
+    {
+      "str": "quantifies how the change happens",
+      "transform": [
+        7.9701,
+        0,
+        0,
+        7.9701,
+        220.64599999999996,
+        80.865
+      ],
+      "width": 123.83144369999992,
+      "height": 7.9701,
+      "fontName": "g_d0_f5",
+      "hasEOL": true
+    },
+    {
+      "str": "comes from assumptions about the model",
+      "transform": [
+        7.9701,
+        0,
+        0,
+        7.9701,
+        208.49599999999995,
+        72.704
+      ],
+      "width": 148.1354666399999,
+      "height": 7.9701,
+      "fontName": "g_d0_f5",
+      "hasEOL": false
+    },
+    {
+      "str": "Prof. Maximilian Klambauer",
+      "transform": [
+        5.9776,
+        0,
+        0,
+        5.9776,
+        97.29,
+        2.989
+      ],
+      "width": 75.6226176,
+      "height": 5.9776,
+      "fontName": "g_d0_f5",
+      "hasEOL": false
+    },
+    {
+      "str": "Lecture 1, MAT244 H1F",
+      "transform": [
+        5.9776,
+        0,
+        0,
+        5.9776,
+        189.921,
+        2.989
+      ],
+      "width": 65.36027392000001,
+      "height": 5.9776,
+      "fontName": "g_d0_f5",
+      "hasEOL": false
+    }
+  ]
+}

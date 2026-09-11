@@ -39,12 +39,18 @@ test("routes an uncaptioned slide table through full-page visual translation", (
   assert.equal(shouldUseVisualPageTranslation(segments), true);
 });
 
-test("does not mistake ordinary two-column prose for a table", () => {
+test("routes ordinary two-column prose through visual translation", () => {
   const segments = Array.from({ length: 8 }, (_, row) => [
     { text: `Left-column paragraph ${row}`, rects: [{ x: .08, y: .14 + row * .08, width: .36, height: .02 }] },
     { text: `Right-column paragraph ${row}`, rects: [{ x: .55, y: .14 + row * .08, width: .36, height: .02 }] },
   ]).flat();
-  assert.equal(shouldUseVisualPageTranslation(segments), false);
+  assert.equal(shouldUseVisualPageTranslation(segments), true);
+});
+
+test("routes a text-layer segment that crosses the page gutter", () => {
+  assert.equal(shouldUseVisualPageTranslation([
+    { text: "Merged columns", rects: [{ x: .08, y: .2, width: .86, height: .03 }] },
+  ]), true);
 });
 
 test("keeps ordinary prose and table mentions on text-layer translation", () => {

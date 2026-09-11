@@ -6,16 +6,16 @@ export type TranslationUsage = {
   reasoningTokens: number;
 };
 
-export function buildFullTranslationQueue(totalPages: number, currentPage: number, translatedPages: number[]) {
+export function buildFullTranslationQueue(totalPages: number, currentPage: number, translatedPages: number[], attemptedPages: number[] = []) {
   const translated = new Set(translatedPages);
+  const attempted = new Set(attemptedPages);
   const pages = Array.from({ length: Math.max(0, totalPages) }, (_, index) => index + 1);
   const pivot = Math.min(Math.max(1, currentPage), Math.max(1, totalPages));
   const prioritized = [
     pivot,
-    ...pages.filter((page) => page > pivot),
-    ...pages.filter((page) => page < pivot),
+    ...pages.filter((page) => page !== pivot),
   ];
-  return prioritized.filter((page, index) => page <= totalPages && !translated.has(page) && prioritized.indexOf(page) === index);
+  return prioritized.filter((page) => page <= totalPages && !translated.has(page) && !attempted.has(page));
 }
 
 export function mergeTranslationUsage(current: TranslationUsage | undefined, next: TranslationUsage | undefined) {

@@ -1,11 +1,36 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import { buildPageSegments, compatibleTranslationPages, isPageTranslationCompatible } from "../app/page-segmentation.ts";
+import { mapPdfTextItemsToSegments } from "../app/page-segment-geometry.ts";
 
 const viewport = { width: 600, height: 840 };
 const transform = (x, y, size = 10) => [size, 0, 0, size, x, y];
 const item = (str, x, y, width, fontName = "body", size = 10) => ({ str, transform: transform(x, y, size), width, fontName });
+
+test("keeps the real slide's wrapped sentence in one selectable paragraph", async () => {
+  const fixture = JSON.parse(await readFile(new URL("./fixtures/modelling-ode-page11.json", import.meta.url), "utf8"));
+  const segments = buildPageSegments(fixture.items, fixture.viewport, 11);
+  const paragraph = segments.find((segment) => segment.text.startsWith("Key idea"));
+  assert.equal(paragraph?.text, "Key idea in modelling with an ODE: identify how a quantity is changing");
+  assert.equal(paragraph?.rects.length, 2);
+  const owners = mapPdfTextItemsToSegments(fixture.items, segments, fixture.viewport.width, fixture.viewport.height);
+  assert.equal(owners.find((owner) => owner.text === "changing")?.segmentId, paragraph.id);
+  assert.equal(owners.find((owner) => owner.text.startsWith("Key idea"))?.segmentId, paragraph.id);
+  assert.notEqual(owners.find((owner) => owner.text.startsWith("What is it"))?.segmentId, paragraph.id);
+  assert.notEqual(owners.find((owner) => owner.text.startsWith("How can you"))?.segmentId, paragraph.id);
+});
+
+test("keeps a displaced slide note out of the full-width paragraph", async () => {
+  const fixture = JSON.parse(await readFile(new URL("./fixtures/modelling-ode-page11.json", import.meta.url), "utf8"));
+  for (const [x, y] of [[65, 209.063], [28.346, 200]]) {
+    const items = fixture.items.map((item) => item.str === "changing"
+      ? { ...item, transform: [...item.transform.slice(0, 4), x, y] } : item);
+    const segments = buildPageSegments(items, fixture.viewport, 11);
+    assert.equal(segments.find((segment) => segment.text.startsWith("Key idea"))?.rects.length, 1);
+  }
+});
 
 test("keeps complete translations valid across transient source re-segmentation", () => {
   const current = [
@@ -51,6 +76,27 @@ test("requires exact segment coverage when live source segments are available", 
     { id: "p5-v2-s2", translation: "二" },
   ], source), true);
   assert.equal(isPageTranslationCompatible(5, [{ id: "p5-v2-s1", translation: "一" }], source), false);
+});
+
+test("keeps an explicitly visual translation after text-layer recovery", () => {
+  const source = buildPageSegments([item("Modelling with ODE", 60, 500, 200)], viewport, 12);
+  const translated = [{ id: "p12-visual", translation: "用常微分方程建模" }];
+  assert.equal(isPageTranslationCompatible(12, translated, source), true);
+  assert.equal(isPageTranslationCompatible(11, translated, source), false);
+  assert.equal(isPageTranslationCompatible(12, [{ ...translated[0], translation: "" }], source), false);
+});
+
+test("keeps narrow-gutter two-column text in separate complete paragraphs", () => {
+  const items = [];
+  for (let row = 0; row < 8; row += 1) {
+    items.push(item(`Left column sentence ${row} continues`, 54, 500 - row * 12, 247));
+    items.push(item(`Right column sentence ${row} continues`, 312, 500 - row * 12, 247));
+  }
+  const segments = buildPageSegments(items, { width: 612, height: 792 }, 6);
+  assert.equal(segments.length, 2);
+  assert.match(segments[0].text, /^Left column sentence 0/);
+  assert.match(segments[1].text, /^Right column sentence 0/);
+  assert.ok(!segments.some((segment) => /Left column[\s\S]*Right column|Right column[\s\S]*Left column/.test(segment.text)));
 });
 
 test("keeps inline-heading paragraphs separate and excludes text embedded in a figure", () => {

@@ -3,17 +3,7 @@ import ReactMarkdown from "react-markdown";
 import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
-
-function normalizeLatexDelimiters(markdown: string) {
-  // remark-math understands dollar delimiters. Convert the LaTeX delimiters
-  // that assistants commonly emit, while leaving code examples untouched.
-  return markdown
-    .split(/(```[\s\S]*?```|~~~[\s\S]*?~~~|`[^`\n]*`)/g)
-    .map((part, index) => index % 2 === 1 ? part : part
-      .replace(/\\\[([\s\S]*?)\\\]/g, (_match, formula: string) => `\n\n$$${formula}$$\n\n`)
-      .replace(/\\\(([^\n]*?)\\\)/g, (_match, formula: string) => `$${formula}$`))
-    .join("");
-}
+import { normalizeLatexDelimiters } from "./markdown-math";
 
 function MarkdownTable({ children, ...props }: ComponentPropsWithoutRef<"table">) {
   return <div className="chat-markdown-table"><table {...props}>{children}</table></div>;

@@ -52,16 +52,17 @@ export function isPageTranslationCompatible(
   if (!translatedSegments.length || translatedSegments.some((segment) => !segment.translation?.trim())) return false;
   const visualId = `p${pageNumber}-visual`;
   const visualTranslation = translatedSegments.length === 1 && translatedSegments[0].id === visualId;
+  const visualBlocks = translatedSegments.every((segment, index) => segment.id === `${visualId}-b${index + 1}`);
+  // A reader can explicitly translate any page visually, including text-layer pages.
+  if (visualTranslation || visualBlocks) return true;
   if (sourceSegments?.length) {
     const sourceRequiresVisual = isVisualPageSegments(sourceSegments)
       || shouldUseVisualPageTranslation(sourceSegments);
     if (sourceRequiresVisual) return visualTranslation;
-    if (visualTranslation) return false;
     if (sourceSegments.length !== translatedSegments.length) return false;
     const translatedIds = new Set(translatedSegments.map((segment) => segment.id));
     return sourceSegments.every((segment) => translatedIds.has(segment.id));
   }
-  if (visualTranslation) return true;
 
   const prefix = `p${pageNumber}-v${SEGMENTATION_VERSION}-s`;
   const indices = translatedSegments.map((segment) => {
@@ -131,6 +132,19 @@ function hasInlineHeading(line: Pick<Line, "parts">, bodyFont: string) {
     && /^[A-Z\p{Lu}]/u.test(prefix)
     && !/[.!?;:]$/.test(prefix)
     && /^[A-Z\p{Lu}\d]/u.test(body);
+}
+
+function isWrappedProseContinuation(previous: Line | undefined, line: Line) {
+  if (!previous || previous.heading || line.heading || line.inlineHeading) return false;
+  const gap = previous.y - line.y;
+  const size = Math.max(previous.height, line.height);
+  return /^[a-z]{2,}\b/.test(line.text)
+    && (previous.text.match(/[A-Za-z]{2,}/g)?.length || 0) >= 3
+    && !/[.!?。！？:;]$/.test(previous.text)
+    && gap >= size * .75 && gap <= size * 1.55
+    && Math.abs(previous.x - line.x) <= size * .35
+    && Math.min(previous.height, line.height) >= size * .9
+    && previous.parts.some((part) => part.fontName && line.parts.some((next) => next.fontName === part.fontName));
 }
 
 function draftFromLines(block: Line[], viewport: PdfViewport): SegmentDraft | null {
@@ -287,6 +301,15 @@ export function buildPageSegments(
     lane: !twoColumnPage || isGeometricallyWide(line) ? "wide" : line.x + line.width / 2 < midpoint ? "left" : "right",
   }));
 
+  // A short final line of a full-width paragraph still belongs to that flow.
+  // Otherwise a slide's equation annotations can make it look like a column.
+  for (let index = 1; index < lines.length; index += 1) {
+    const previous = lines[index - 1];
+    if (previous.lane === "wide" && isWrappedProseContinuation(previous, lines[index])) {
+      lines[index].lane = "wide";
+    }
+  }
+
   const buildBlocks = (flow: Line[]): SegmentDraft[] => {
     if (!flow.length) return [];
     const ordered = [...flow].sort((a, b) => b.y - a.y || a.x - b.x);
@@ -309,8 +332,9 @@ export function buildPageSegments(
       const indented = line.x - flowLeft > Math.max(bodyHeight * 1.1, flowWidth * .025);
       const previousShort = previous ? previous.width < flowWidth * .72 : false;
       const sentenceBreak = previous ? /[.!?。！？:]$/.test(previous.text) && /^[A-Z\d]/.test(line.text) : false;
+      const wrappedContinuation = isWrappedProseContinuation(previous, line);
       const startsBlock = !previous || line.heading || line.inlineHeading || previous.heading
-        || gap > normalGap * 1.35
+        || (!wrappedContinuation && gap > normalGap * 1.35)
         || (indented && (sentenceBreak || previousShort));
       if (startsBlock && block.length) flush();
       block.push(line);

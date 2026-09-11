@@ -131,10 +131,11 @@ test("keeps local learning-material reading, direct Codex calls, scrolling, zoom
   assert.match(page, /第 \$\{sourcePage\} 页没有文字层，正在生成整页图片/);
   assert.match(page, /翻译全文/);
   assert.match(page, /compatibleTranslationPages\(restoredTranslations\)/);
-  assert.match(page, /const completed = compatibleTranslationPages\(translations, pageSegments\)\.length/);
+  assert.match(page, /const completedTranslationCount = useMemo\(\(\) => compatibleTranslationPages\(translations, pageSegments\)/);
+  assert.match(page, /aria-label="全文翻译完成进度" value=\{completedTranslationCount\}/);
   assert.match(page, /isPageTranslationCompatible\(pageNumber, translatedSegments, sourceSegments\)/);
   assert.match(page, /译文需要更新/);
-  assert.match(page, /自动重新加入全文翻译队列/);
+  assert.match(page, /请重新翻译本页或继续全文翻译/);
   assert.match(page, /extractEmbeddedPaperOutline/);
   assert.match(page, /buildDetectedPaperOutline/);
   assert.match(page, /全文目录/);

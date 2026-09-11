@@ -23,6 +23,44 @@ async function withMockServer(handler, run) {
   }
 }
 
+test("OpenAI streaming gateway collects deltas when completed output is empty without duplicating done text", async () => {
+  await withMockServer(async (request, response) => {
+    const body = await readBody(request);
+    assert.equal(body.stream, true);
+    assert.equal(body.store, false);
+    response.writeHead(200, { "content-type": "text/event-stream" });
+    const events = [
+      { type: "response.output_text.delta", output_index: 0, content_index: 0, delta: "O" },
+      { type: "response.output_text.delta", output_index: 0, content_index: 0, delta: "K" },
+      { type: "response.output_text.done", output_index: 0, content_index: 0, text: "OK" },
+      { type: "response.completed", response: { model: "gpt-5.6-sol", output: [], usage: { input_tokens: 3, output_tokens: 1, total_tokens: 4 } } },
+    ];
+    for (const event of events) response.write(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
+    response.end();
+  }, async (baseURL) => {
+    const provider = createOpenAIProvider({ apiKey: "test-key", baseURL, streaming: true });
+    const result = await provider.invoke({ mode: "chat" }, { prompt: "Only reply OK" });
+    assert.equal(result.answer, "OK");
+    assert.equal(result.model, "gpt-5.6-sol");
+    assert.equal(result.usage.totalTokens, 4);
+  });
+});
+
+for (const terminal of [null, "response.failed", "response.incomplete"]) {
+  test(`OpenAI streaming rejects partial output on ${terminal || "disconnection"}`, async () => {
+    await withMockServer(async (request, response) => {
+      await readBody(request);
+      response.writeHead(200, { "content-type": "text/event-stream" });
+      response.write(`data: ${JSON.stringify({ type: "response.output_text.delta", output_index: 0, content_index: 0, delta: "partial" })}\n\n`);
+      if (terminal) response.write(`data: ${JSON.stringify({ type: terminal, response: {} })}\n\n`);
+      response.end();
+    }, async (baseURL) => {
+      const provider = createOpenAIProvider({ apiKey: "test-key", baseURL, streaming: true });
+      await assert.rejects(provider.invoke({ mode: "translate" }, { prompt: "translate" }), (error) => error.code === "incomplete_response");
+    });
+  });
+}
+
 test("OpenAI adapter sends Responses API image input, strict schema, retries once, and normalizes usage", async () => {
   let attempts = 0;
   let received;

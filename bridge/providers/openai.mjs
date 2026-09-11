@@ -1,7 +1,7 @@
 import OpenAI from "openai";
 import { ProviderError, normalizeProviderError } from "../provider-errors.mjs";
 
-export const OPENAI_MODELS = ["gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.6-sol"];
+export const OPENAI_MODELS = ["gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.6-sol", "gpt-6-astra"];
 export const OPENAI_REASONING_EFFORTS = ["none", "low", "medium", "high"];
 
 const TRANSLATION_SCHEMA = {
@@ -85,12 +85,33 @@ function normalizeUsage(usage) {
   };
 }
 
+async function collectResponse(stream) {
+  let completed;
+  const parts = new Map();
+  for await (const event of stream) {
+    const key = `${event.output_index}:${event.content_index}`;
+    if (event.type === "response.output_text.delta") parts.set(key, (parts.get(key) || "") + event.delta);
+    if (event.type === "response.output_text.done") parts.set(key, event.text);
+    if (event.type === "response.completed") completed = event.response;
+    if (event.type === "response.failed" || event.type === "response.incomplete" || event.type === "error") {
+      throw new ProviderError(event.response?.error?.message || event.message || "OpenAI 流式响应未完成", {
+        code: "incomplete_response", status: 502, provider: "openai",
+      });
+    }
+  }
+  if (!completed) throw new ProviderError("OpenAI 流式连接在完成前断开", { code: "incomplete_response", status: 502, provider: "openai" });
+  const outputText = completed.output?.flatMap((item) => item.type === "message" ? item.content || [] : [])
+    .filter((part) => part.type === "output_text").map((part) => part.text).join("");
+  return { ...completed, output_text: completed.output_text || outputText || [...parts.values()].join("") };
+}
+
 export function createOpenAIProvider({
   apiKey = process.env.OPENAI_API_KEY,
   baseURL = process.env.PAPERLENS_OPENAI_BASE_URL,
   translationModel = process.env.PAPERLENS_OPENAI_TRANSLATION_MODEL || "gpt-5.6-terra",
   chatModel = process.env.PAPERLENS_OPENAI_CHAT_MODEL || "gpt-5.6-terra",
   reasoningEffort = process.env.PAPERLENS_OPENAI_REASONING_EFFORT || "low",
+  streaming = process.env.PAPERLENS_OPENAI_STREAM === "1",
   clientFactory = (options) => new OpenAI(options),
 } = {}) {
   const configured = Boolean(apiKey);
@@ -113,6 +134,7 @@ export function createOpenAIProvider({
     }
     const body = {
       model: selectedModel,
+      ...(streaming ? { stream: true, store: false } : {}),
       input: [{ role: "user", content }],
       reasoning: { effort: selectedEffort },
       ...(payload.mode === "translate" ? {
@@ -125,7 +147,8 @@ export function createOpenAIProvider({
     let lastError;
     for (let attempt = 0; attempt < 2; attempt += 1) {
       try {
-        const response = await getClient().responses.create(body, { signal, timeout: 180_000 });
+        const result = await getClient().responses.create(body, { signal, timeout: 180_000 });
+        const response = streaming ? await collectResponse(result) : result;
         const answer = response.output_text?.trim();
         if (!answer) throw new ProviderError("OpenAI API 没有返回文本内容", { code: "empty_response", status: 502, retryable: true, provider: "openai" });
         return {
