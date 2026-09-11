@@ -34,7 +34,7 @@ import {
   ZoomOutOutlined,
 } from "@ant-design/icons";
 import katex from "katex";
-import { type ChangeEvent as ReactChangeEvent, type ClipboardEvent as ReactClipboardEvent, type FormEvent as ReactFormEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { type ChangeEvent as ReactChangeEvent, type ClipboardEvent as ReactClipboardEvent, type FormEvent as ReactFormEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { isAbortError, runWithCodexRecovery } from "./ai-recovery";
 import { ChatMarkdown } from "./chat-markdown";
 import { findClosestPageToViewportCenter, shouldRenderPage } from "./continuous-scroll";
@@ -85,6 +85,8 @@ import {
 } from "./reader-workspace";
 import { mergeSelectionRects, normalizeSelectionRect, type SelectionRect } from "./selection-geometry";
 import { createVisualPageSegment, isVisualPageSegments, shouldUseVisualPageTranslation, VISUAL_PAGE_SOURCE } from "./visual-page-translation";
+import { recoverTranslationNewlines } from "./markdown-math";
+import { sourceSegmentAtPoint, visualPageMapping, type VisualTranslation } from "./visual-alignment";
 
 type PdfTextContent = { items: PdfTextItem[]; styles?: Record<string, unknown>; lang?: string | null };
 type PdfRenderTask = { promise: Promise<void>; cancel: () => void };
@@ -107,7 +109,7 @@ type RightTab = "translation" | "outline" | "terms" | "notes";
 type MobileView = "paper" | "translation";
 type AnnotationMode = "select" | "highlight" | "comment" | "erase";
 type BridgeStatus = "checking" | "ready" | "offline";
-type AIProviderId = "local-codex" | "cloudbase-hunyuan" | "openai" | "mimo";
+type AIProviderId = "local-codex" | "chatgpt-web" | "cloudbase-hunyuan" | "openai" | "mimo";
 type AIUsage = { inputTokens: number; outputTokens: number; totalTokens: number; cachedTokens: number; reasoningTokens: number };
 type ProviderInfo = {
   id: AIProviderId;
@@ -117,11 +119,12 @@ type ProviderInfo = {
   busy?: boolean;
   skillAvailable?: boolean;
   allowedModels?: string[];
+  reasoningEffortsByModel?: Record<string, string[]>;
   models?: { translation: string; chat: string };
   reasoningEffort?: string;
 };
 type ProviderMap = Partial<Record<AIProviderId, ProviderInfo>>;
-type AISettings = { provider: AIProviderId; translationModel: string; chatModel: string; reasoningEffort: string };
+type AISettings = { translationReasoningEffort: string; chatReasoningEffort: string; modelSelectionVersion?: number; provider: AIProviderId; translationModel: string; chatModel: string; reasoningEffort: string };
 type HighlightRect = { id: string; groupId: string; x: number; y: number; width: number; height: number; text: string };
 type PendingSelection = {
   pageNumber: number;
@@ -161,7 +164,8 @@ type CommentEditorState = {
   anchorY: number;
   content: string;
 };
-type TranslatedSegment = { id: string; translation: string; formulaExplanation: string };
+type TranslatedSegment = VisualTranslation;
+const EMPTY_PAGE_SEGMENTS: PageSegment[] = [];
 type TranslationJob = "page" | "full";
 type FullTranslationStatus = "idle" | "running" | "paused" | "failed" | "complete";
 type OutlineStatus = "idle" | "loading" | "ready" | "failed";
@@ -240,8 +244,11 @@ const MAX_PDF_CANVAS_EDGE = 4096;
 const MAX_PDF_CANVAS_PIXELS = 16_000_000;
 const DEFAULT_AI_SETTINGS: AISettings = {
   provider: "local-codex",
-  translationModel: "gpt-5.6-terra",
-  chatModel: "gpt-5.6-terra",
+  modelSelectionVersion: 2,
+  translationModel: "gpt-5.6-luna",
+  chatModel: "gpt-5.6-sol",
+  translationReasoningEffort: "medium",
+  chatReasoningEffort: "high",
   reasoningEffort: "low",
 };
 
@@ -677,10 +684,53 @@ async function invokeAI(payload: Record<string, unknown>, settings: AISettings, 
 }
 
 function providerDisplayName(provider: AIProviderId, model?: string) {
+  if (provider === "chatgpt-web") return "ChatGPT 网页 · 实验";
   if (provider === "cloudbase-hunyuan") return `混元${model ? ` · ${model}` : " · CloudBase"}`;
   if (provider === "openai") return `OpenAI${model ? ` · ${model}` : " API"}`;
   if (provider === "mimo") return `MiMo${model ? ` · ${model}` : " API"}`;
-  return "本机 Codex";
+  return `本机 Codex${model ? ` · ${model}` : ""}`;
+}
+
+function modelChoices(provider: AIProviderId, providers: ProviderMap) {
+  if (provider === "local-codex") return ["", ...(providers[provider]?.allowedModels || [])];
+  return providers[provider]?.allowedModels?.length ? providers[provider]!.allowedModels! : provider === "chatgpt-web" ? ["chatgpt-web"] : provider === "cloudbase-hunyuan" ? ["hy3"] : provider === "mimo" ? ["mimo-v2.5", "mimo-v2.5-pro"] : ["gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.6-sol"];
+}
+
+function ModelPicker({ channel, settings, providers, disabled, onChange }: {
+  channel: "translation" | "chat";
+  settings: AISettings;
+  providers: ProviderMap;
+  disabled?: boolean;
+  onChange: (settings: AISettings) => void;
+}) {
+  const field = channel === "translation" ? "translationModel" : "chatModel";
+  const effortField = channel === "translation" ? "translationReasoningEffort" : "chatReasoningEffort";
+  const provider = settings.provider === "chatgpt-web" && channel === "translation" ? "mimo" : settings.provider;
+  const choices = modelChoices(provider, providers);
+  const current = settings[field];
+  const options = choices.includes(current) ? choices : [...choices, current];
+  const effortsFor = (model: string) => provider === "openai" ? ["none", "low", "medium", "high"] : providers[provider]?.reasoningEffortsByModel?.[model]?.length ? providers[provider]!.reasoningEffortsByModel![model] : ["low", "medium", "high"];
+  const efforts = effortsFor(current);
+  return <div className="inline-model-controls">
+    <label className="inline-model-picker">
+      <span>{channel === "translation" ? "翻译模型" : "对话模型"}</span>
+      <select aria-label={channel === "translation" ? "翻译模型" : "对话模型"} value={current} disabled={disabled || provider === "chatgpt-web"} title={disabled ? "任务完成后可切换模型" : "用于下一次请求；已生成内容保持不变"}
+        onChange={(event) => {
+          const model = event.target.value;
+          const supported = effortsFor(model);
+          onChange({ ...settings, modelSelectionVersion: 2, [field]: model, [effortField]: supported.includes(settings[effortField]) ? settings[effortField] : supported.includes("high") ? "high" : supported[0] });
+        }}>
+        {options.map((model) => <option key={model} value={model}>{model || "Codex 默认模型"}</option>)}
+      </select>
+    </label>
+    {(provider === "local-codex" || provider === "openai") && <label className="inline-model-picker effort-picker">
+      <span>推理</span>
+      <select aria-label={channel === "translation" ? "翻译推理强度" : "对话推理强度"} value={settings[effortField]} disabled={disabled}
+        onChange={(event) => onChange({ ...settings, modelSelectionVersion: 2, [effortField]: event.target.value })}>
+        {(efforts.includes(settings[effortField]) ? efforts : [...efforts, settings[effortField]]).map((effort) => <option key={effort} value={effort}>{effort}</option>)}
+      </select>
+    </label>}
+  </div>;
 }
 
 function usageSummary(usage?: AIUsage) {
@@ -711,7 +761,6 @@ function AISettingsModal({
 }) {
   const selected = providers[settings.provider];
   const status = bridgeStatus === "checking" ? "checking" : bridgeStatus === "offline" || !selected?.available ? "offline" : "ready";
-  const models = selected?.allowedModels?.length ? selected.allowedModels : settings.provider === "cloudbase-hunyuan" ? ["hy3"] : settings.provider === "mimo" ? ["mimo-v2.5", "mimo-v2.5-pro"] : ["gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.6-sol"];
   return (
     <div className="modal-backdrop" onMouseDown={onClose}>
       <section className="modal ai-settings-modal" role="dialog" aria-modal="true" aria-labelledby="ai-settings-title" onMouseDown={(event) => event.stopPropagation()}>
@@ -719,34 +768,36 @@ function AISettingsModal({
         <h2 id="ai-settings-title">AI 服务设置</h2>
         <p>选择翻译和问答使用的服务。API Key 只从本机服务端环境变量读取，不会保存到浏览器。</p>
         <div className="provider-options" role="radiogroup" aria-label="AI Provider">
-          {(["local-codex", "cloudbase-hunyuan", "mimo", "openai"] as AIProviderId[]).map((providerId) => {
+          {(["local-codex", "chatgpt-web", "cloudbase-hunyuan", "mimo", "openai"] as AIProviderId[]).map((providerId) => {
             const info = providers[providerId];
             const active = settings.provider === providerId;
             return (
               <button key={providerId} type="button" role="radio" aria-checked={active} className={`provider-option ${active ? "active" : ""}`} onClick={() => onSettingsChange({
                 ...settings,
                 provider: providerId,
-                ...(providerId === "cloudbase-hunyuan" ? { translationModel: "hy3", chatModel: "hy3" } : providerId === "mimo" ? { translationModel: "mimo-v2.5", chatModel: "mimo-v2.5" } : providerId === "openai" ? { translationModel: "gpt-5.6-terra", chatModel: "gpt-5.6-terra" } : {}),
+                modelSelectionVersion: 2,
+                translationReasoningEffort: "medium",
+                chatReasoningEffort: "high",
+                ...(info?.models ? { translationModel: info.models.translation, chatModel: info.models.chat } : providerId === "chatgpt-web" ? { translationModel: "mimo-v2.5", chatModel: "chatgpt-web" } : providerId === "cloudbase-hunyuan" ? { translationModel: "hy3", chatModel: "hy3" } : providerId === "mimo" ? { translationModel: "mimo-v2.5", chatModel: "mimo-v2.5" } : providerId === "openai" ? { translationModel: "gpt-5.6-terra", chatModel: "gpt-5.6-terra" } : { translationModel: "gpt-5.6-luna", chatModel: "gpt-5.6-sol" }),
               })}>
                 <span><RobotOutlined /></span>
-                <div><strong>{providerId === "local-codex" ? "本机 Codex" : providerId === "cloudbase-hunyuan" ? "腾讯混元 · CloudBase" : providerId === "mimo" ? "Xiaomi MiMo" : "OpenAI API"}</strong><small>{info?.available ? "可用" : providerId === "local-codex" ? "未检测到" : "未配置 API Key"}</small></div>
+                <div><strong>{providerId === "local-codex" ? "本机 Codex" : providerId === "chatgpt-web" ? "ChatGPT 网页 · 实验" : providerId === "cloudbase-hunyuan" ? "腾讯混元 · CloudBase" : providerId === "mimo" ? "Xiaomi MiMo" : "OpenAI API"}</strong><small>{info?.available ? "可用" : providerId === "chatgpt-web" ? "浏览器扩展未连接" : providerId === "local-codex" ? "未检测到" : "未配置 API Key"}</small></div>
                 <i>{active ? <CheckOutlined /> : null}</i>
               </button>
             );
           })}
         </div>
-        {settings.provider !== "local-codex" && (
+        {settings.provider !== "chatgpt-web" && (
           <div className="ai-model-settings">
-            <label>翻译模型<select value={settings.translationModel} onChange={(event) => onSettingsChange({ ...settings, translationModel: event.target.value })}>{models.map((model) => <option key={model} value={model}>{model}</option>)}</select></label>
-            <label>问答模型<select value={settings.chatModel} onChange={(event) => onSettingsChange({ ...settings, chatModel: event.target.value })}>{models.map((model) => <option key={model} value={model}>{model}</option>)}</select></label>
-            {settings.provider === "openai" && <label>推理强度<select value={settings.reasoningEffort} onChange={(event) => onSettingsChange({ ...settings, reasoningEffort: event.target.value })}><option value="none">无</option><option value="low">低</option><option value="medium">中</option><option value="high">高</option></select></label>}
+            <ModelPicker channel="translation" settings={settings} providers={providers} onChange={onSettingsChange} />
+            <ModelPicker channel="chat" settings={settings} providers={providers} onChange={onSettingsChange} />
           </div>
         )}
         <div className={`codex-connection-card ${status}`}>
           <RobotOutlined />
           <div>
-            <strong>{status === "ready" ? `${selected?.label || "AI 服务"} 已就绪` : status === "checking" ? "正在检测…" : settings.provider === "cloudbase-hunyuan" ? "CloudBase 混元尚未配置" : settings.provider === "openai" ? "OpenAI API 尚未配置" : settings.provider === "mimo" ? "MiMo API 尚未配置" : "本机 AI 桥接未启动"}</strong>
-            <span>{status === "ready" ? settings.provider === "local-codex" ? `Paper Reader Skill ${skillAvailable ? "已安装" : "未检测到"}` : `翻译 ${settings.translationModel} · 问答 ${settings.chatModel}` : settings.provider === "cloudbase-hunyuan" ? "在本机 .env 中设置 CLOUDBASE_ENV_ID 和 CLOUDBASE_APIKEY 后重启" : settings.provider === "openai" ? "在本机 .env 中设置 OPENAI_API_KEY 后重启" : settings.provider === "mimo" ? "在本机 .env 中设置 MIMO_API_KEY 后重启" : "请用 npm run dev 启动网页和桥接"}</span>
+            <strong>{status === "ready" ? `${selected?.label || "AI 服务"} 已就绪` : status === "checking" ? "正在检测…" : settings.provider === "chatgpt-web" ? "ChatGPT 网页扩展尚未连接" : settings.provider === "cloudbase-hunyuan" ? "CloudBase 混元尚未配置" : settings.provider === "openai" ? "OpenAI API 尚未配置" : settings.provider === "mimo" ? "MiMo API 尚未配置" : "本机 AI 桥接未启动"}</strong>
+            <span>{status === "ready" ? settings.provider === "local-codex" ? `Paper Reader Skill ${skillAvailable ? "已安装" : "未检测到"}` : settings.provider === "chatgpt-web" ? "问答走已登录的 ChatGPT Chat；翻译和术语仍走 MiMo" : `翻译 ${settings.translationModel} · 问答 ${settings.chatModel}` : settings.provider === "chatgpt-web" ? "在 Chrome 扩展页加载 browser-extension 文件夹，然后打开并登录 chatgpt.com" : settings.provider === "cloudbase-hunyuan" ? "在本机 .env 中设置 CLOUDBASE_ENV_ID 和 CLOUDBASE_APIKEY 后重启" : settings.provider === "openai" ? "在本机 .env 中设置 OPENAI_API_KEY 后重启" : settings.provider === "mimo" ? "在本机 .env 中设置 MIMO_API_KEY 后重启" : "请用 npm run dev 启动网页和桥接"}</span>
           </div>
         </div>
         {testStatus && <div className="provider-test-status" role="status">{testStatus}</div>}
@@ -937,7 +988,8 @@ function PdfPageView({
       const nextSegments = buildPageSegments(content.items, baseViewport, pageNumber, nextFigures);
       const textSpans = Array.from(textLayer.querySelectorAll<HTMLElement>("span"))
         .filter((span) => !span.querySelector("span") && Boolean(span.textContent?.trim()));
-      const itemOwners = mapPdfTextItemsToSegments(content.items, nextSegments, baseViewport.width, baseViewport.height);
+      const syncSegments = segments.some(segment => /-visual-b\d+$/.test(segment.id)) ? segments : nextSegments;
+      const itemOwners = mapPdfTextItemsToSegments(content.items, syncSegments, baseViewport.width, baseViewport.height);
       const segmentIds = alignRenderedTextToSegments(textSpans.map((span) => span.textContent || ""), itemOwners);
       textSpans.forEach((span, index) => {
         const segmentId = segmentIds[index];
@@ -963,7 +1015,7 @@ function PdfPageView({
       textLayerBuilder?.cancel();
       resizeObserver?.disconnect();
     };
-  }, [displayWidth, onPageParsed, onPageSize, onStatus, pageNumber, pdf, renderContent]);
+  }, [displayWidth, onPageParsed, onPageSize, onStatus, pageNumber, pdf, renderContent, segments]);
 
   const activeSegment = segments.find((segment) => segment.id === activeSegmentId) || null;
   const contextSegment = segments.find((segment) => segment.id === contextSegmentId) || null;
@@ -1211,6 +1263,8 @@ export default function Home() {
   const workspaceShellRef = useRef<HTMLElement>(null);
   const documentPanelRef = useRef<HTMLElement>(null);
   const pdfStageRef = useRef<HTMLDivElement>(null);
+  const translationContentRef = useRef<HTMLDivElement>(null);
+  const translationEntryRef = useRef<{ page: number; bottom: boolean } | null>(null);
   const pageFrameRefs = useRef(new Map<number, HTMLElement>());
   const pageNumberRef = useRef(1);
   const pageInputFocusedRef = useRef(false);
@@ -1257,6 +1311,8 @@ export default function Home() {
   const [zoom, setZoom] = useState(1);
   const [pageTexts, setPageTexts] = useState<Record<number, string>>({});
   const [pageSegments, setPageSegments] = useState<Record<number, PageSegment[]>>({});
+  const pageSegmentsRef = useRef(pageSegments);
+  useLayoutEffect(() => { pageSegmentsRef.current = pageSegments; }, [pageSegments]);
   const [translations, setTranslations] = useState<Record<number, TranslatedSegment[]>>({});
   const [paperTerms, setPaperTerms] = useState<Record<number, PaperTerm[]>>({});
   const [paperOutline, setPaperOutline] = useState<PaperOutlineItem[]>([]);
@@ -1316,8 +1372,12 @@ export default function Home() {
 
   const isTranslating = translationJob !== null;
   const currentText = pageTexts[pageNumber] || "";
-  const currentSegments = useMemo(() => pageSegments[pageNumber] || [], [pageNumber, pageSegments]);
-  const currentTranslatedSegments = useMemo(() => translations[pageNumber] || [], [pageNumber, translations]);
+  const visualMappings = useMemo<Record<number, ReturnType<typeof visualPageMapping>>>(() => Object.fromEntries(Object.entries(translations)
+    .map(([page, translated]) => [page, visualPageMapping(Number(page), translated, pageSegments[Number(page)] || [])])), [translations, pageSegments]);
+  const syncedPageSegments = useMemo<Record<number, PageSegment[]>>(() => ({ ...pageSegments, ...Object.fromEntries(Object.entries(visualMappings).map(([page, mapping]) => [page, mapping.source])) }), [pageSegments, visualMappings]);
+  const syncedTranslations = useMemo<Record<number, TranslatedSegment[]>>(() => ({ ...translations, ...Object.fromEntries(Object.entries(visualMappings).map(([page, mapping]) => [page, mapping.translations])) }), [translations, visualMappings]);
+  const currentSegments = useMemo(() => syncedPageSegments[pageNumber] || [], [pageNumber, syncedPageSegments]);
+  const currentTranslatedSegments = useMemo(() => syncedTranslations[pageNumber] || [], [pageNumber, syncedTranslations]);
   const currentTranslation = currentTranslatedSegments.map((segment) => segment.translation).join("\n\n");
   const activeSegmentId = hoveredSegmentId || contextSegmentId;
   const repositoryFromReadPages = useMemo(() => findGitHubRepository(Object.values(pageTexts).join("\n")), [pageTexts]);
@@ -1326,9 +1386,10 @@ export default function Home() {
   const selectedProviderAvailable = bridgeStatus === "ready" && Boolean(selectedProvider?.available);
   const codexAvailable = bridgeStatus === "ready" && Boolean(providers["local-codex"]?.available);
   const aiTaskProviderAvailable = selectedProviderAvailable || codexAvailable;
-  const effectiveAISettings = useMemo<AISettings>(() => selectedProviderAvailable ? aiSettings : { ...aiSettings, provider: "local-codex" }, [aiSettings, selectedProviderAvailable]);
-  const selectedProviderLabel = providerDisplayName(aiSettings.provider, aiSettings.provider !== "local-codex" ? aiSettings.chatModel : undefined);
-  const effectiveProviderLabel = providerDisplayName(effectiveAISettings.provider, effectiveAISettings.provider !== "local-codex" ? effectiveAISettings.chatModel : undefined);
+  const effectiveAISettings = useMemo<AISettings>(() => selectedProviderAvailable ? aiSettings : { ...aiSettings, provider: "local-codex", translationModel: "gpt-5.6-luna", chatModel: "gpt-5.6-sol", translationReasoningEffort: "medium", chatReasoningEffort: "high" }, [aiSettings, selectedProviderAvailable]);
+  const translationProviderLabel = providerDisplayName(aiSettings.provider, aiSettings.translationModel);
+  const selectedProviderLabel = providerDisplayName(aiSettings.provider, aiSettings.chatModel);
+  const effectiveProviderLabel = providerDisplayName(effectiveAISettings.provider, effectiveAISettings.chatModel);
   const selectedStatus: BridgeStatus = bridgeStatus === "checking" ? "checking" : selectedProviderAvailable ? "ready" : "offline";
   const folderMentionRecords = useMemo(() => libraryFolders.map((folder) => ({
     ...folder,
@@ -1354,28 +1415,31 @@ export default function Home() {
             ? "继续全文翻译"
             : "翻译全文";
   const fullTranslationStatusText = fullTranslation.status === "running"
-    ? `正在翻译第 ${fullTranslation.currentPage} 页`
+    ? `后台正在翻译第 ${fullTranslation.currentPage} 页`
     : fullTranslation.status === "complete"
       ? "全文译文已准备好"
       : fullTranslation.status === "paused"
         ? "已暂停，可从未完成页继续"
         : fullTranslation.status === "failed"
-          ? `${fullTranslation.failedPages.length || 1} 页待重试`
+          ? "全文翻译未完成，可重试剩余页"
           : fullTranslation.completed > 0
             ? "已保存，可继续翻译剩余页面"
             : "一次准备全部页面，之后翻页无需等待";
 
+  const completedTranslationCount = useMemo(() => compatibleTranslationPages(translations, pageSegments)
+    .filter((page) => page >= 1 && page <= (pdf?.numPages || 0)).length, [translations, pageSegments, pdf]);
+
   useEffect(() => {
-    if (!pdf || translationJob === "full") return;
-    const completed = compatibleTranslationPages(translations, pageSegments).length;
+    if (!pdf) return;
+    const completed = completedTranslationCount;
     setFullTranslation((previous) => {
-      const status = completed >= pdf.numPages
+      const status = translationJob === "full" ? previous.status : completed >= pdf.numPages
         ? "complete"
         : previous.status === "complete" ? "idle" : previous.status;
       if (previous.completed === completed && previous.total === pdf.numPages && previous.status === status) return previous;
       return { ...previous, status, completed, total: pdf.numPages };
     });
-  }, [pageSegments, pdf, translationJob, translations]);
+  }, [completedTranslationCount, pdf, translationJob]);
 
   const displayPageWidth = Math.max(240, Math.min(pageSize.width, stageAvailableWidth) * zoom);
 
@@ -1391,7 +1455,7 @@ export default function Home() {
       let storedProvider: AIProviderId | undefined;
       try {
         const stored = JSON.parse(localStorage.getItem(AI_SETTINGS_KEY) || "null") as Partial<AISettings> | null;
-        if (stored?.provider === "local-codex" || stored?.provider === "cloudbase-hunyuan" || stored?.provider === "openai" || stored?.provider === "mimo") {
+        if (stored?.provider === "local-codex" || stored?.provider === "chatgpt-web" || stored?.provider === "cloudbase-hunyuan" || stored?.provider === "openai" || stored?.provider === "mimo") {
           storedProvider = stored.provider;
         }
       } catch {
@@ -1404,8 +1468,8 @@ export default function Home() {
         setAISettings((previous) => ({
           ...previous,
           provider,
-          translationModel: models?.translation || previous.translationModel,
-          chatModel: models?.chat || previous.chatModel,
+          translationModel: models?.translation ?? previous.translationModel,
+          chatModel: models?.chat ?? previous.chatModel,
         }));
       }
       setBridgeStatus("ready");
@@ -1423,11 +1487,15 @@ export default function Home() {
   useEffect(() => {
     try {
       const stored = JSON.parse(localStorage.getItem(AI_SETTINGS_KEY) || "null") as Partial<AISettings> | null;
-      if (stored && (stored.provider === "local-codex" || stored.provider === "cloudbase-hunyuan" || stored.provider === "openai" || stored.provider === "mimo")) {
+      if (stored && (stored.provider === "local-codex" || stored.provider === "chatgpt-web" || stored.provider === "cloudbase-hunyuan" || stored.provider === "openai" || stored.provider === "mimo")) {
         setAISettings({
           provider: stored.provider,
-          translationModel: stored.translationModel || DEFAULT_AI_SETTINGS.translationModel,
-          chatModel: stored.chatModel || DEFAULT_AI_SETTINGS.chatModel,
+          modelSelectionVersion: 2,
+          // Migrate settings that predate independent model/effort selection.
+          translationModel: stored.provider === "local-codex" && stored.modelSelectionVersion !== 2 ? DEFAULT_AI_SETTINGS.translationModel : stored.translationModel ?? DEFAULT_AI_SETTINGS.translationModel,
+          chatModel: stored.provider === "local-codex" && stored.modelSelectionVersion !== 2 ? DEFAULT_AI_SETTINGS.chatModel : stored.chatModel ?? DEFAULT_AI_SETTINGS.chatModel,
+          translationReasoningEffort: stored.translationReasoningEffort || DEFAULT_AI_SETTINGS.translationReasoningEffort,
+          chatReasoningEffort: stored.chatReasoningEffort || DEFAULT_AI_SETTINGS.chatReasoningEffort,
           reasoningEffort: ["none", "low", "medium", "high"].includes(stored.reasoningEffort || "") ? stored.reasoningEffort! : DEFAULT_AI_SETTINGS.reasoningEffort,
         });
       }
@@ -2415,6 +2483,7 @@ export default function Home() {
     signal: AbortSignal,
     generation = documentGenerationRef.current,
     reportStatus: (status: string) => void = setMessage,
+    forceVisual = false,
   ) => {
     const assertCurrentDocument = () => {
       if (signal.aborted || !isCurrentDocumentGeneration(generation, documentGenerationRef.current)) {
@@ -2422,9 +2491,9 @@ export default function Home() {
       }
     };
     assertCurrentDocument();
-    const knownText = pageTexts[sourcePage];
-    const knownSegments = pageSegments[sourcePage];
-    if (knownText && knownSegments?.length && !isVisualPageSegments(knownSegments) && !shouldUseVisualPageTranslation(knownSegments)) {
+    const knownSegments = pageSegmentsRef.current[sourcePage];
+    const knownText = knownSegments?.map((segment) => segment.text).join("\n\n").trim().slice(0, 28_000) || pageTexts[sourcePage];
+    if (!forceVisual && knownText && knownSegments?.length && !isVisualPageSegments(knownSegments) && !shouldUseVisualPageTranslation(knownSegments)) {
       return { text: knownText, segments: knownSegments, visualOnly: false, images: [] as ChatImageAttachment[] };
     }
     const sourcePdf = pdfRef.current;
@@ -2462,12 +2531,11 @@ export default function Home() {
         }],
       };
     }
-    if (shouldUseVisualPageTranslation(segments)) {
-      reportStatus(`第 ${sourcePage} 页包含复杂表格，正在生成整页视觉输入…`);
+    if (forceVisual || shouldUseVisualPageTranslation(segments)) {
+      reportStatus(`正在生成第 ${sourcePage} 页整页视觉输入…`);
       const dataUrl = await renderPdfPageForVision(page, signal);
       assertCurrentDocument();
       const visualSegments = [createVisualPageSegment(sourcePage)] as PageSegment[];
-      setPageSegments((previous) => ({ ...previous, [sourcePage]: visualSegments }));
       return {
         text: VISUAL_PAGE_SOURCE,
         segments: visualSegments,
@@ -2500,7 +2568,7 @@ export default function Home() {
   const translatePageSource = async (sourcePage: number, source: Awaited<ReturnType<typeof getTranslationSource>>, signal: AbortSignal) => {
     try {
       const completion = await completeTranslationWithRepair(
-        source.segments,
+        source.segments.map(segment => ({ ...segment, requireVisualBlocks: source.visualOnly })),
         (pendingSegments, repairAttempt, previousFailure) => invokeAI({
           mode: "translate",
           pageNumber: sourcePage,
@@ -2511,7 +2579,7 @@ export default function Home() {
           segments: pendingSegments.map(({ id, text: segmentText, kind }) => ({ id, text: segmentText, kind })),
           images: source.images.map(({ label, source: imageSource, pageNumber: imagePageNumber, dataUrl }) => ({ label, source: imageSource, pageNumber: imagePageNumber, dataUrl })),
           paperTitle: fileName,
-        }, repairAttempt > 0 && codexAvailable ? { ...aiSettings, provider: "local-codex" } : effectiveAISettings, signal),
+        }, repairAttempt > 0 && codexAvailable ? { ...aiSettings, ...(aiSettings.provider !== "local-codex" ? { translationModel: "gpt-5.6-luna", chatModel: "gpt-5.6-sol", translationReasoningEffort: "medium", chatReasoningEffort: "high" } : {}), provider: "local-codex" } : effectiveAISettings, signal),
         (pendingSegments, repairAttempt) => {
           setMessage(codexAvailable
             ? `第 ${sourcePage} 页执行异常，Codex 正在诊断并修复（${repairAttempt}/${MAX_TRANSLATION_REPAIR_ATTEMPTS}）…`
@@ -2534,7 +2602,7 @@ export default function Home() {
     setMessage(translationJob === "full" ? "正在停止全文翻译…" : "正在停止当前页翻译…");
   };
 
-  const translateCurrent = async () => {
+  const translateCurrent = async (forceVisual = false) => {
     if (isTranslating) {
       stopTranslation();
       return;
@@ -2544,24 +2612,27 @@ export default function Home() {
       return;
     }
     const sourcePage = pageNumber;
+    const generation = documentGenerationRef.current;
     const controller = new AbortController();
     translationAbortRef.current = controller;
     setTranslationJob("page");
     setTranslatingPage(sourcePage);
     setRightTab("translation");
     setMobileView("translation");
-    setMessage(`${providerDisplayName(effectiveAISettings.provider, effectiveAISettings.provider !== "local-codex" ? effectiveAISettings.translationModel : undefined)} 正在翻译第 ${sourcePage} 页…`);
+    setMessage(`${providerDisplayName(effectiveAISettings.provider, effectiveAISettings.translationModel)} 正在翻译第 ${sourcePage} 页…`);
     try {
-      const source = await getTranslationSource(sourcePage, controller.signal);
+      const source = await getTranslationSource(sourcePage, controller.signal, generation, setMessage, forceVisual);
       if (source.visualOnly) setMessage(`${selectedProviderLabel} 正在识别并翻译第 ${sourcePage} 页图片…`);
       const { result, translated } = await translatePageSource(sourcePage, source, controller.signal);
+      if (controller.signal.aborted || generation !== documentGenerationRef.current) throw new DOMException("Aborted", "AbortError");
       const nextTranslations = { ...translations, [sourcePage]: translated };
       setTranslations(nextTranslations);
       await persistTranslations(nextTranslations);
+      if (controller.signal.aborted || generation !== documentGenerationRef.current) throw new DOMException("Aborted", "AbortError");
       setLastTranslationUsage(result.usage);
       setLastTranslationProvider(providerDisplayName(result.provider, result.model));
       setLastTranslationPage(sourcePage);
-      const completed = compatibleTranslationPages(nextTranslations, pageSegments).length;
+      const completed = compatibleTranslationPages(nextTranslations, pageSegmentsRef.current).length;
       setFullTranslation((previous) => {
         const failedPages = previous.failedPages.filter((failedPage) => failedPage !== sourcePage);
         const failedReasons = Object.fromEntries(Object.entries(previous.failedReasons || {}).filter(([failedPage]) => Number(failedPage) !== sourcePage));
@@ -2574,6 +2645,7 @@ export default function Home() {
       });
       setMessage(`第 ${sourcePage} 页${source.visualOnly ? "图片识别与" : ""}翻译完成 · ${providerDisplayName(result.provider, result.model)}${result.usage ? ` · ${usageSummary(result.usage)}` : ""}`);
     } catch (error) {
+      if (generation !== documentGenerationRef.current) return;
       if (isAbortError(error)) {
         setMessage("已停止当前页翻译");
         return;
@@ -2582,9 +2654,11 @@ export default function Home() {
       const bridgeReady = await checkCodexBridge();
       if (!bridgeReady) setShowConnect(true);
     } finally {
-      if (translationAbortRef.current === controller) translationAbortRef.current = null;
-      setTranslationJob(null);
-      setTranslatingPage(0);
+      if (translationAbortRef.current === controller) {
+        translationAbortRef.current = null;
+        setTranslationJob(null);
+        setTranslatingPage(0);
+      }
     }
   };
 
@@ -2607,7 +2681,7 @@ export default function Home() {
     }
 
     let nextTranslations = { ...translations };
-    const translatedPages = compatibleTranslationPages(nextTranslations, pageSegments);
+    const translatedPages = compatibleTranslationPages(nextTranslations, pageSegmentsRef.current);
     const queue = buildFullTranslationQueue(pdf.numPages, pageNumber, translatedPages);
     if (!queue.length) {
       setFullTranslation((previous) => ({ ...previous, status: "complete", completed: pdf.numPages, total: pdf.numPages, currentPage: 0, failedPages: [] }));
@@ -2616,6 +2690,7 @@ export default function Home() {
     }
 
     const controller = new AbortController();
+    const generation = documentGenerationRef.current;
     translationAbortRef.current = controller;
     setTranslationJob("full");
     setRightTab("translation");
@@ -2629,8 +2704,15 @@ export default function Home() {
     setFullTranslation({ status: "running", completed, total: pdf.numPages, currentPage: queue[0], failedPages: [], failedReasons: {}, usage: accumulatedUsage, providerLabel: lastProviderLabel });
 
     try {
-      for (const sourcePage of queue) {
-        if (controller.signal.aborted) throw new DOMException("Aborted", "AbortError");
+      const attemptedPages: number[] = [];
+      while (true) {
+        if (controller.signal.aborted || generation !== documentGenerationRef.current) throw new DOMException("Aborted", "AbortError");
+        const completedPages = compatibleTranslationPages(nextTranslations, pageSegmentsRef.current);
+        // Re-evaluate after each page: follow the reader, then fill earlier gaps.
+        const [sourcePage] = buildFullTranslationQueue(pdf.numPages, pageNumberRef.current, completedPages, attemptedPages);
+        if (!sourcePage) break;
+        attemptedPages.push(sourcePage);
+        completed = completedPages.length;
         setTranslatingPage(sourcePage);
         setFullTranslation((previous) => ({ ...previous, status: "running", currentPage: sourcePage, failedPages, failedReasons }));
         setMessage(`正在翻译全文 · 第 ${sourcePage} 页 · 已完成 ${completed}/${pdf.numPages}`);
@@ -2638,8 +2720,9 @@ export default function Home() {
           const source = await getTranslationSource(sourcePage, controller.signal);
           if (source.visualOnly) setMessage(`正在识别并翻译第 ${sourcePage} 页图片 · 已完成 ${completed}/${pdf.numPages}`);
           const { result, translated } = await translatePageSource(sourcePage, source, controller.signal);
+          if (controller.signal.aborted || generation !== documentGenerationRef.current) throw new DOMException("Aborted", "AbortError");
           nextTranslations = { ...nextTranslations, [sourcePage]: translated };
-          completed = compatibleTranslationPages(nextTranslations, pageSegments).length;
+          completed = compatibleTranslationPages(nextTranslations, pageSegmentsRef.current).length;
           consecutiveFailures = 0;
           accumulatedUsage = mergeTranslationUsage(accumulatedUsage, result.usage);
           lastProviderLabel = providerDisplayName(result.provider, result.model);
@@ -2659,7 +2742,9 @@ export default function Home() {
         }
       }
 
-      const completedPages = compatibleTranslationPages(nextTranslations, pageSegments);
+      if (controller.signal.aborted || generation !== documentGenerationRef.current) throw new DOMException("Aborted", "AbortError");
+      const completedPages = compatibleTranslationPages(nextTranslations, pageSegmentsRef.current);
+      completed = completedPages.length;
       const remaining = buildFullTranslationQueue(pdf.numPages, pageNumber, completedPages);
       if (remaining.length || failedPages.length) {
         setFullTranslation({ status: "failed", completed, total: pdf.numPages, currentPage: 0, failedPages, failedReasons, usage: accumulatedUsage, providerLabel: lastProviderLabel });
@@ -2669,6 +2754,7 @@ export default function Home() {
         setMessage(`全文翻译完成 · ${lastProviderLabel}${accumulatedUsage ? ` · ${usageSummary(accumulatedUsage)}` : ""}`);
       }
     } catch (error) {
+      if (generation !== documentGenerationRef.current) return;
       if (controller.signal.aborted || isAbortError(error)) {
         setFullTranslation((previous) => ({ ...previous, status: "paused", completed, total: pdf.numPages, currentPage: 0, failedPages, failedReasons, usage: accumulatedUsage, providerLabel: lastProviderLabel }));
         setMessage(`已暂停全文翻译 · 完成 ${completed}/${pdf.numPages} 页`);
@@ -2677,9 +2763,11 @@ export default function Home() {
         setMessage(error instanceof Error ? error.message : "全文翻译暂时不可用");
       }
     } finally {
-      if (translationAbortRef.current === controller) translationAbortRef.current = null;
-      setTranslationJob(null);
-      setTranslatingPage(0);
+      if (translationAbortRef.current === controller) {
+        translationAbortRef.current = null;
+        setTranslationJob(null);
+        setTranslatingPage(0);
+      }
     }
   };
 
@@ -3126,7 +3214,7 @@ export default function Home() {
         setPageNumber(sourcePage);
       }
       setRightTab("translation");
-      if (!(translations[sourcePage] || []).some((segment) => segment.id === segmentId)) return;
+      if (!(syncedTranslations[sourcePage] || []).some((segment) => segment.id === segmentId)) return;
       requestAnimationFrame(() => {
         const container = document.querySelector<HTMLElement>(".translation-content");
         const target = document.querySelector<HTMLElement>(`[data-translation-segment="${segmentId}"]`);
@@ -3138,7 +3226,7 @@ export default function Home() {
       return;
     }
 
-    const segment = (pageSegments[sourcePage] || []).find((candidate) => candidate.id === segmentId);
+    const segment = (syncedPageSegments[sourcePage] || []).find((candidate) => candidate.id === segmentId);
     const stage = pdfStageRef.current;
     const frame = pageFrameRefs.current.get(sourcePage);
     if (!segment || !stage || !frame || !segment.rects.length) return;
@@ -3151,14 +3239,16 @@ export default function Home() {
       top: Math.max(0, frame.offsetTop + ((top + bottom) / 2) * frame.offsetHeight - stage.clientHeight / 2),
       behavior: "smooth",
     });
-  }, [pageSegments, translations]);
+  }, [syncedPageSegments, syncedTranslations]);
 
   const handleSourceHover = useCallback((sourcePage: number, event: ReactMouseEvent<HTMLDivElement>) => {
     if (annotationMode !== "select") return;
     const target = (event.target as HTMLElement).closest<HTMLElement>("[data-segment-id]");
-    const segmentId = target?.dataset.segmentId || "";
+    const bounds = event.currentTarget.getBoundingClientRect();
+    const segmentId = target?.dataset.segmentId || sourceSegmentAtPoint(syncedPageSegments[sourcePage] || [],
+      (event.clientX - bounds.left) / bounds.width, (event.clientY - bounds.top) / bounds.height)?.id || "";
     if (segmentId && segmentId !== activeSegmentId) activateSegment(segmentId, "source", sourcePage);
-  }, [activateSegment, activeSegmentId, annotationMode]);
+  }, [activateSegment, activeSegmentId, annotationMode, syncedPageSegments]);
 
   const handleSourceClick = useCallback((sourcePage: number, event: ReactMouseEvent<HTMLDivElement>) => {
     if (annotationMode !== "select") return;
@@ -3169,8 +3259,10 @@ export default function Home() {
     const selection = window.getSelection();
     if (selection && !selection.isCollapsed && selection.toString().trim()) return;
     const target = (event.target as HTMLElement).closest<HTMLElement>("[data-segment-id]");
-    const segmentId = target?.dataset.segmentId || "";
-    const segment = (pageSegments[sourcePage] || []).find((candidate) => candidate.id === segmentId);
+    const bounds = event.currentTarget.getBoundingClientRect();
+    const segmentId = target?.dataset.segmentId || sourceSegmentAtPoint(syncedPageSegments[sourcePage] || [],
+      (event.clientX - bounds.left) / bounds.width, (event.clientY - bounds.top) / bounds.height)?.id || "";
+    const segment = (syncedPageSegments[sourcePage] || []).find((candidate) => candidate.id === segmentId);
     if (!segment) return;
     pageNumberRef.current = sourcePage;
     setPageNumber(sourcePage);
@@ -3182,7 +3274,7 @@ export default function Home() {
     setPendingSelection(null);
     activateSegment(segment.id, "source", sourcePage);
     setMessage("整段已作为 AI Chat 上下文");
-  }, [activateSegment, annotationMode, pageSegments]);
+  }, [activateSegment, annotationMode, syncedPageSegments]);
 
   const clearChatContext = useCallback(() => {
     setSelectedText("");
@@ -3194,7 +3286,7 @@ export default function Home() {
     window.getSelection()?.removeAllRanges();
   }, []);
 
-  const changePage = useCallback((next: number) => {
+  const changePage = useCallback((next: number, immediate = false) => {
     if (!pdf) return;
     const boundedPage = normalizeCommittedPageInput(String(next), pageNumberRef.current, pdf.numPages);
     const previousPage = pageNumberRef.current;
@@ -3215,10 +3307,71 @@ export default function Home() {
       const frameRect = frame.getBoundingClientRect();
       const targetTop = Math.max(0, stage.scrollTop + frameRect.top - stageRect.top - 16);
       const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-      const behavior: ScrollBehavior = !reduceMotion && Math.abs(boundedPage - previousPage) <= 2 ? "smooth" : "auto";
+      const behavior: ScrollBehavior = !immediate && !reduceMotion && Math.abs(boundedPage - previousPage) <= 2 ? "smooth" : "auto";
       stage.scrollTo({ top: targetTop, behavior });
     });
   }, [pdf]);
+
+  useLayoutEffect(() => {
+    const container = translationContentRef.current;
+    if (!container || rightTab !== "translation") return;
+    const entry = translationEntryRef.current;
+    container.scrollTop = entry?.page === pageNumber && entry.bottom ? container.scrollHeight : 0;
+    translationEntryRef.current = null;
+  }, [pageNumber, currentPaperId, rightTab]);
+
+  useEffect(() => {
+    const container = translationContentRef.current;
+    if (!container || !pdf || rightTab !== "translation") return;
+    let lastWheelAt = 0;
+    let turnedInGesture = false;
+    let boundaryDelta = 0;
+    let touchY: number | null = null;
+    const turnAtBoundary = (delta: number) => {
+      if (turnedInGesture || !delta) return turnedInGesture;
+      const atBoundary = delta > 0
+        ? container.scrollTop + container.clientHeight >= container.scrollHeight - 2
+        : container.scrollTop <= 2;
+      if (!atBoundary) { boundaryDelta = 0; return false; }
+      if (Math.sign(boundaryDelta) !== Math.sign(delta)) boundaryDelta = 0;
+      boundaryDelta += delta;
+      const next = pageNumberRef.current + Math.sign(delta);
+      if (Math.abs(boundaryDelta) < 48 || next < 1 || next > pdf.numPages) return false;
+      turnedInGesture = true;
+      translationEntryRef.current = { page: next, bottom: delta < 0 };
+      changePage(next, true);
+      return true;
+    };
+    const onWheel = (event: WheelEvent) => {
+      if (event.ctrlKey || Math.abs(event.deltaX) > Math.abs(event.deltaY)) return;
+      const now = performance.now();
+      if (now - lastWheelAt > 180) { turnedInGesture = false; boundaryDelta = 0; }
+      lastWheelAt = now;
+      const delta = event.deltaY * (event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? container.clientHeight : 1);
+      // Consume the remainder of a trackpad gesture so momentum cannot skip pages.
+      if (turnAtBoundary(delta)) event.preventDefault();
+    };
+    const onTouchStart = (event: TouchEvent) => {
+      touchY = event.touches.length === 1 ? event.touches[0].clientY : null;
+      turnedInGesture = false;
+      boundaryDelta = 0;
+    };
+    const onTouchMove = (event: TouchEvent) => {
+      if (touchY === null || event.touches.length !== 1) return;
+      const nextY = event.touches[0].clientY;
+      const delta = touchY - nextY;
+      touchY = nextY;
+      if (turnAtBoundary(delta) && event.cancelable) event.preventDefault();
+    };
+    container.addEventListener("wheel", onWheel, { passive: false });
+    container.addEventListener("touchstart", onTouchStart, { passive: true });
+    container.addEventListener("touchmove", onTouchMove, { passive: false });
+    return () => {
+      container.removeEventListener("wheel", onWheel);
+      container.removeEventListener("touchstart", onTouchStart);
+      container.removeEventListener("touchmove", onTouchMove);
+    };
+  }, [pdf, rightTab, changePage, appView]);
 
   const commitPageNumberInput = useCallback((raw: string) => {
     if (!pdf) return;
@@ -3354,7 +3507,7 @@ export default function Home() {
           <div className="library-header-actions">
             <button className={`library-bridge ${selectedStatus}`} onClick={() => setShowConnect(true)}>
               <i />
-              {selectedStatus === "ready" ? `${selectedProviderLabel} 已连接` : selectedStatus === "checking" ? "正在检测 AI 服务" : aiSettings.provider === "cloudbase-hunyuan" ? "CloudBase 混元未配置" : aiSettings.provider === "openai" ? "OpenAI API 未配置" : aiSettings.provider === "mimo" ? "MiMo API 未配置" : "Codex 未连接"}
+              {selectedStatus === "ready" ? `${selectedProviderLabel} 已连接` : selectedStatus === "checking" ? "正在检测 AI 服务" : aiSettings.provider === "chatgpt-web" ? "ChatGPT 网页扩展未连接" : aiSettings.provider === "cloudbase-hunyuan" ? "CloudBase 混元未配置" : aiSettings.provider === "openai" ? "OpenAI API 未配置" : aiSettings.provider === "mimo" ? "MiMo API 未配置" : "Codex 未连接"}
             </button>
             <button className="library-import-button" onClick={() => fileInputRef.current?.click()}><PlusOutlined /> 导入文档</button>
           </div>
@@ -3554,7 +3707,7 @@ export default function Home() {
         <header className="document-header">
           <div className="breadcrumb"><button className="breadcrumb-home" onClick={goToWorkspace}><HomeOutlined /> 我的空间</button> <span>/</span> <strong>{fileName || "未导入文档"}</strong> <DownOutlined /></div>
           <div className="document-actions">
-            <button className={`bridge-pill ${selectedStatus}`} onClick={() => setShowConnect(true)} title="AI 服务设置"><RobotOutlined /> {selectedStatus === "ready" ? selectedProviderLabel : selectedStatus === "checking" ? "检测 AI 服务" : aiSettings.provider === "local-codex" ? "Codex 未连接" : "API 未配置"}</button>
+            <button className={`bridge-pill ${selectedStatus}`} onClick={() => setShowConnect(true)} title="AI 服务设置"><RobotOutlined /> {selectedStatus === "ready" ? selectedProviderLabel : selectedStatus === "checking" ? "检测 AI 服务" : aiSettings.provider === "local-codex" ? "Codex 未连接" : aiSettings.provider === "chatgpt-web" ? "ChatGPT 未连接" : "API 未配置"}</button>
             <button onClick={() => fileInputRef.current?.click()}><UploadOutlined /> 更换 PDF</button>
           </div>
         </header>
@@ -3628,7 +3781,7 @@ export default function Home() {
                     pageSize={pageSizes[targetPage] || pageSize}
                     renderContent={shouldRenderPage(targetPage, pageNumber)}
                     isActive={targetPage === pageNumber}
-                    segments={pageSegments[targetPage] || []}
+                    segments={syncedPageSegments[targetPage] || EMPTY_PAGE_SEGMENTS}
                     highlights={highlights[targetPage] || []}
                     comments={comments.filter((comment) => comment.pageNumber === targetPage)}
                     commentEditor={commentEditor?.pageNumber === targetPage ? commentEditor : null}
@@ -3700,7 +3853,7 @@ export default function Home() {
           <div className="chat-drawer-header">
             <button className="chat-drawer-toggle" onClick={() => setChatOpen((value) => !value)} aria-expanded={chatOpen}>
               <span><RobotOutlined /> AI Chat</span>
-              <span className={`bridge-status ${selectedStatus}`}><i /> {selectedStatus === "ready" ? selectedProviderLabel : "未连接"}</span>
+              <span className={`bridge-status ${selectedStatus}`}><i /> {selectedStatus === "ready" ? providerDisplayName(aiSettings.provider) : "未连接"}</span>
               {selectedText && <span className="collapsed-context">已引用：{selectedText.slice(0, 46)}</span>}
               {!!chatPaperMentions.length && <span className="collapsed-papers"><FilePdfOutlined /> {chatPaperMentions.length} 份资料</span>}
               {!!chatFolderMentions.length && <span className="collapsed-folders"><FolderOutlined /> {chatFolderMentions.length} 个文件夹</span>}
@@ -3711,6 +3864,7 @@ export default function Home() {
           </div>
           {chatOpen && (
             <div className="chat-drawer-body">
+              <div className="chat-model-row"><ModelPicker channel="chat" settings={aiSettings} providers={providers} disabled={isChatting} onChange={setAISettings} /></div>
               <div className="chat-context-row">
                 {selectedText ? <button className="context-chip" title={selectedText} onClick={clearChatContext}><span>{chatContextKind === "paragraph" ? "整段" : "选区"}</span>{selectedText.slice(0, 54)}<CloseCircleOutlined /></button> : <span className="context-hint">整篇资料已作为基础上下文；单击可重点引用整段，拖选则引用选中文字</span>}
                 {repositoryUrl && <a className="repo-chip active connected" href={repositoryUrl} target="_blank" rel="noreferrer" title={`在 GitHub 打开 ${repositoryName(repositoryUrl)}`} aria-label={`在 GitHub 打开仓库 ${repositoryName(repositoryUrl)}`}><GithubOutlined /><strong>{repositoryName(repositoryUrl)}</strong><i>按问题动态核实</i><ExportOutlined /></a>}
@@ -3826,13 +3980,15 @@ export default function Home() {
           <button className={rightTab === "terms" ? "active" : ""} onClick={() => setRightTab("terms")}>术语</button>
           <button className={rightTab === "notes" ? "active" : ""} onClick={() => setRightTab("notes")}>笔记</button>
         </nav>
+        <div className="translation-model-row"><ModelPicker channel="translation" settings={aiSettings} providers={providers} disabled={isTranslating} onChange={setAISettings} /></div>
         <div className="translation-toolbar">
           <div>
             <button title="上一页" disabled={!pdf || pageNumber <= 1} onClick={() => changePage(pageNumber - 1)}><LeftOutlined /></button>
             <button title="下一页" disabled={!pdf || pageNumber >= (pdf?.numPages || 1)} onClick={() => changePage(pageNumber + 1)}><RightOutlined /></button>
           </div>
           <div>
-            <button title={isTranslating ? "停止翻译" : currentTranslation ? `重新翻译（${selectedProviderLabel}）` : `翻译当前页（${selectedProviderLabel}）`} disabled={!pdf} onClick={translateCurrent}>{isTranslating ? <CloseOutlined /> : currentTranslation ? <ReloadOutlined /> : <TranslationOutlined />}</button>
+            <button title={isTranslating ? "停止翻译" : currentTranslation ? `重新翻译（${translationProviderLabel}）` : `翻译当前页（${translationProviderLabel}）`} disabled={!pdf} onClick={() => void translateCurrent()}>{isTranslating ? <CloseOutlined /> : currentTranslation ? <ReloadOutlined /> : <TranslationOutlined />}</button>
+            <button className="translate-all-button" title="结合整页图像重新翻译当前页，完成后替换旧译文" disabled={!pdf || isTranslating} onClick={() => void translateCurrent(true)}>整页重译</button>
             <button className="translate-all-button" title={fullTranslationLabel} disabled={!pdf || fullTranslation.status === "complete"} onClick={() => void translateFullPaper()}>{translationJob === "full" ? <CloseOutlined /> : fullTranslation.status === "paused" || fullTranslation.status === "failed" ? <ReloadOutlined /> : <TranslationOutlined />}<span>{fullTranslationLabel}</span></button>
             <button title="复制译文" disabled={!currentTranslation} onClick={() => navigator.clipboard.writeText(currentTranslation)}><CopyOutlined /></button>
             <button title="AI 服务设置" onClick={() => setShowConnect(true)}><SettingOutlined /></button>
@@ -3842,8 +3998,8 @@ export default function Home() {
 
         {(fullTranslation.status !== "idle" || fullTranslation.completed > 0) && (
           <div className={`full-translation-progress ${fullTranslation.status}`}>
-            <div><span>{fullTranslationStatusText}</span><strong>{fullTranslation.completed}/{fullTranslation.total || pdf?.numPages || 0}</strong></div>
-            <progress value={fullTranslation.completed} max={Math.max(1, fullTranslation.total || pdf?.numPages || 1)} />
+            <div><span>{fullTranslationStatusText}</span><strong>已完成 {completedTranslationCount}/{pdf?.numPages || 0} 页</strong></div>
+            <progress aria-label="全文翻译完成进度" value={completedTranslationCount} max={Math.max(1, pdf?.numPages || 1)} />
             {fullTranslation.failedReasons && Object.keys(fullTranslation.failedReasons).length > 0 && (
               <small className="translation-failure-reasons">{Object.entries(fullTranslation.failedReasons).map(([failedPage, reason]) => `第 ${failedPage} 页：${reason}`).join("；")}</small>
             )}
@@ -3851,13 +4007,15 @@ export default function Home() {
           </div>
         )}
 
-        <div className="translation-content">
+        <div className="translation-content" ref={translationContentRef}>
           {rightTab === "translation" && (
             <TranslationView
               pageNumber={pageNumber}
               sourceSegments={currentSegments}
               translatedSegments={currentTranslatedSegments}
-              loading={isTranslating && translatingPage === pageNumber && !currentTranslation}
+              loading={isTranslating && translatingPage === pageNumber && !isPageTranslationCompatible(pageNumber, currentTranslatedSegments, currentSegments)}
+              queued={translationJob === "full" && translatingPage !== pageNumber}
+              failureReason={fullTranslation.failedReasons?.[pageNumber]}
               hasPdf={!!pdf}
               activeSegmentId={activeSegmentId}
               contextSegmentId={contextSegmentId}
@@ -3869,7 +4027,7 @@ export default function Home() {
               onTranslateAll={() => void translateFullPaper()}
               fullTranslationLabel={fullTranslationLabel}
               onImport={() => fileInputRef.current?.click()}
-              providerLabel={lastTranslationPage === pageNumber && lastTranslationProvider ? lastTranslationProvider : selectedProviderLabel}
+              providerLabel={lastTranslationPage === pageNumber && lastTranslationProvider ? lastTranslationProvider : currentTranslation ? "历史缓存" : translationProviderLabel}
               usage={lastTranslationPage === pageNumber ? lastTranslationUsage : undefined}
             />
           )}
@@ -3901,7 +4059,7 @@ export default function Home() {
           <div className="translation-footer">
             <span>{message}</span>
             <div>
-              <button disabled={!pdf || translationJob === "full"} onClick={translateCurrent}>{translationJob === "page" ? <CloseOutlined /> : <TranslationOutlined />} {translationJob === "page" ? "停止翻译" : "翻译本页"}</button>
+              <button disabled={!pdf || translationJob === "full"} onClick={() => void translateCurrent()}>{translationJob === "page" ? <CloseOutlined /> : <TranslationOutlined />} {translationJob === "page" ? "停止翻译" : "翻译本页"}</button>
             </div>
           </div>
         )}
@@ -3952,11 +4110,13 @@ function Thumbnail({ pdf, pageNumber, active, onSelect }: { pdf: PdfDocument; pa
   );
 }
 
-function TranslationView({ pageNumber, sourceSegments, translatedSegments, loading, hasPdf, activeSegmentId, contextSegmentId, contextSegmentIds, contextKind, onActivate, onDeactivate, onTranslate, onTranslateAll, fullTranslationLabel, onImport, providerLabel, usage }: {
+function TranslationView({ pageNumber, sourceSegments, translatedSegments, loading, queued, failureReason, hasPdf, activeSegmentId, contextSegmentId, contextSegmentIds, contextKind, onActivate, onDeactivate, onTranslate, onTranslateAll, fullTranslationLabel, onImport, providerLabel, usage }: {
   pageNumber: number;
   sourceSegments: PageSegment[];
   translatedSegments: TranslatedSegment[];
   loading: boolean;
+  queued: boolean;
+  failureReason?: string;
   hasPdf: boolean;
   activeSegmentId: string;
   contextSegmentId: string;
@@ -3975,23 +4135,24 @@ function TranslationView({ pageNumber, sourceSegments, translatedSegments, loadi
     return <div className="right-empty"><FilePdfOutlined /><strong>先导入一份学习资料</strong><span>右侧会显示当前页的完整中文翻译</span><button onClick={onImport}>导入文档</button></div>;
   }
   if (loading) {
-    return <div className="translation-loading"><span /><span /><span /><span /><span /></div>;
+    return <div className="translation-loading" role="status"><p>正在翻译第 {pageNumber} 页，译文完成后会自动显示…</p><span /><span /><span /><span /><span /></div>;
   }
   const sourceById = new Map(sourceSegments.map((segment) => [segment.id, segment]));
   const translationCompatible = isPageTranslationCompatible(pageNumber, translatedSegments, sourceSegments);
   if (!translationCompatible) {
     const needsRefresh = translatedSegments.length > 0;
-    return <div className="right-empty"><TranslationOutlined /><strong>{needsRefresh ? `第 ${pageNumber} 页译文需要更新` : `第 ${pageNumber} 页尚未翻译`}</strong><span>{needsRefresh ? "原文段落结构已更新，本页会自动重新加入全文翻译队列" : sourceSegments.length ? `由 ${providerLabel} 保留公式、引用和专业术语` : "若本页没有文字层，将自动读取整页图片"}</span><div className="right-empty-actions"><button onClick={onTranslate}>{needsRefresh ? "重新翻译本页" : "翻译本页"}</button><button className="secondary" onClick={onTranslateAll}>{fullTranslationLabel}</button></div></div>;
+    return <div className="right-empty"><TranslationOutlined /><strong>{failureReason ? `第 ${pageNumber} 页翻译失败` : queued ? `第 ${pageNumber} 页等待翻译` : needsRefresh ? `第 ${pageNumber} 页译文需要更新` : `第 ${pageNumber} 页尚未翻译`}</strong><span>{failureReason || (queued ? "当前任务完成后，会优先翻译正在阅读的这一页" : needsRefresh ? "原文段落结构已更新，请重新翻译本页或继续全文翻译" : sourceSegments.length ? `由 ${providerLabel} 保留公式、引用和专业术语` : "若本页没有文字层，将自动读取整页图片")}</span><div className="right-empty-actions">{!queued && <button onClick={onTranslate}>{failureReason ? "重试本页" : needsRefresh ? "重新翻译本页" : "翻译本页"}</button>}<button className="secondary" onClick={onTranslateAll}>{fullTranslationLabel}</button></div></div>;
   }
   const compatibleTranslations = translatedSegments;
   const sourceReady = sourceSegments.length > 0;
   const synchronized = sourceReady && translatedSegments.every((segment) => sourceById.has(segment.id));
-  const visualPage = isVisualPageSegments(sourceSegments) || compatibleTranslations.some((segment) => /-visual$/.test(segment.id));
+  const visualPage = isVisualPageSegments(sourceSegments) || compatibleTranslations.some((segment) => /-visual(?:-b\d+)?$/.test(segment.id));
   return (
     <article className="translated-article">
-      <div className="article-kicker">第 {pageNumber} 页 · {providerLabel} 中文译文 · {visualPage ? "整页视觉识别" : synchronized ? "段落同步已开启" : sourceReady ? "译文已缓存" : "正在恢复段落同步"}{usage ? ` · ${usageSummary(usage)}` : ""}</div>
+      <div className="article-kicker">第 {pageNumber} 页 · {providerLabel} 中文译文 · {visualPage ? synchronized ? "视觉分段对应已开启" : compatibleTranslations.some(segment => sourceById.has(segment.id)) ? "视觉译文 · 部分区块已对应" : "整页视觉识别" : synchronized ? "段落同步已开启" : sourceReady ? "译文已缓存" : "正在恢复段落同步"}{usage ? ` · ${usageSummary(usage)}` : ""}</div>
       {compatibleTranslations.map((segment) => {
         const source = sourceById.get(segment.id);
+        const canActivate = !visualPage || Boolean(source?.rects.length);
         const heading = source?.kind === "heading";
         const active = segment.id === activeSegmentId;
         const context = contextSegmentIds.includes(segment.id);
@@ -4000,18 +4161,18 @@ function TranslationView({ pageNumber, sourceSegments, translatedSegments, loadi
             key={segment.id}
             data-translation-segment={segment.id}
             className={`translated-segment ${active ? "active" : ""} ${context ? "context" : ""}`}
-            tabIndex={0}
-            onMouseEnter={() => onActivate(segment.id)}
+            tabIndex={canActivate ? 0 : -1}
+            onMouseEnter={() => { if (canActivate) onActivate(segment.id); }}
             onMouseMove={() => {
-              if (!active) onActivate(segment.id);
+              if (canActivate && !active) onActivate(segment.id);
             }}
             onMouseLeave={onDeactivate}
-            onFocus={() => onActivate(segment.id)}
+            onFocus={() => { if (canActivate) onActivate(segment.id); }}
             onBlur={onDeactivate}
-            onClick={() => onActivate(segment.id)}
+            onClick={() => { if (canActivate) onActivate(segment.id); }}
           >
-            {(active || (context && segment.id === contextSegmentId)) && <span className="sync-translation-label">{context ? contextKind === "selection" ? "选区所属译文" : "整段上下文" : "对应原文"}</span>}
-            {visualPage ? <ChatMarkdown text={segment.translation} /> : heading ? <h3><ScientificText text={segment.translation} /></h3> : <p><ScientificText text={segment.translation} /></p>}
+            {canActivate && (active || (context && segment.id === contextSegmentId)) && <span className="sync-translation-label">{context ? contextKind === "selection" ? "选区所属译文" : "整段上下文" : "对应原文"}</span>}
+            {visualPage ? <ChatMarkdown text={recoverTranslationNewlines(segment.translation)} /> : heading ? <h3><ScientificText text={segment.translation} /></h3> : <p><ScientificText text={segment.translation} /></p>}
             {segment.formulaExplanation && (
               <aside className="formula-explanation">
                 <strong>公式解释</strong>

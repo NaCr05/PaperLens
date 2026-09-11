@@ -3,8 +3,21 @@ import test from "node:test";
 
 import { buildFullTranslationQueue, mergeTranslationUsage } from "../app/full-translation.ts";
 
-test("prioritizes the current page, then later pages, and skips completed pages", () => {
-  assert.deepEqual(buildFullTranslationQueue(6, 4, [2, 5]), [4, 6, 1, 3]);
+test("prioritizes the current page, then fills earlier gaps before later pages", () => {
+  assert.deepEqual(buildFullTranslationQueue(6, 4, [2, 5]), [4, 1, 3, 6]);
+});
+
+test("revisits the reading page between completions without retrying failed pages forever", () => {
+  assert.equal(buildFullTranslationQueue(12, 5, [])[0], 5);
+  assert.equal(buildFullTranslationQueue(12, 1, [5], [5])[0], 1);
+  assert.equal(buildFullTranslationQueue(12, 1, [5], [5, 1])[0], 2);
+  assert.equal(buildFullTranslationQueue(12, 1, [5])[0], 1);
+});
+
+test("keeps completed pages out of the queue and handles empty documents", () => {
+  assert.deepEqual(buildFullTranslationQueue(4, 3, [3]), [1, 2, 4]);
+  assert.deepEqual(buildFullTranslationQueue(0, 1, []), []);
+  assert.deepEqual(buildFullTranslationQueue(2, 1, [], [1, 2]), []);
 });
 
 test("handles a fully translated document and an out-of-range current page", () => {

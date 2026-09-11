@@ -16,7 +16,16 @@ export function splitTextLineParts<T extends TextLinePart>(parts: T[], viewportW
   for (const part of [...parts].sort((a, b) => a.x - b.x)) {
     const previous = run[run.length - 1];
     const gap = previous ? part.x - (previous.x + previous.width) : 0;
-    const gutterThreshold = Math.max(viewportWidth * .012, Math.max(previous?.height || 0, part.height) * 1.35);
+    const height = Math.max(previous?.height || 0, part.height);
+    const midpoint = viewportWidth / 2;
+    const crossesColumnGutter = previous
+      && previous.x + previous.width <= midpoint + viewportWidth * .025
+      && part.x >= midpoint - viewportWidth * .025;
+    // IEEE-style papers often have a gutter narrower than 1.35 em. A gap at
+    // the page's centre needs a lower threshold than an ordinary in-line gap.
+    const gutterThreshold = crossesColumnGutter
+      ? Math.max(viewportWidth * .006, height * .65)
+      : Math.max(viewportWidth * .012, height * 1.35);
     if (previous && gap > gutterThreshold) flush();
     run.push(part);
   }

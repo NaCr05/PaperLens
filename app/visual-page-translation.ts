@@ -10,6 +10,31 @@ export type VisualPageSegment = {
 type VisualTranslationRect = { x: number; y: number; width: number; height: number };
 type VisualTranslationCandidate = { text: string; rects?: VisualTranslationRect[] };
 
+function hasTwoColumnLayout(segments: readonly VisualTranslationCandidate[]) {
+  const rects = segments.flatMap((segment) => segment.rects || []).filter((rect) => (
+    Number.isFinite(rect.x) && Number.isFinite(rect.y)
+      && Number.isFinite(rect.width) && Number.isFinite(rect.height)
+      && rect.width >= .08 && rect.width <= .49
+      && rect.y >= .08 && rect.y <= .92
+  ));
+  const left = rects.filter((rect) => rect.x + rect.width / 2 < .48).length;
+  const right = rects.filter((rect) => rect.x + rect.width / 2 > .52).length;
+  return left >= 3 && right >= 3;
+}
+
+function hasSuspiciousGeometry(segments: readonly VisualTranslationCandidate[]) {
+  const rects = segments.flatMap((segment) => segment.rects || []);
+  return rects.some((rect) => (
+    rect.width >= .65 && rect.x < .42 && rect.x + rect.width > .58
+  )) || segments.some((segment) => {
+    const areas = segment.rects || [];
+    if (areas.length < 2) return false;
+    const left = Math.min(...areas.map((rect) => rect.x));
+    const right = Math.max(...areas.map((rect) => rect.x + rect.width));
+    return right - left > .62;
+  });
+}
+
 export function createVisualPageSegment(pageNumber: number): VisualPageSegment {
   return {
     id: `p${pageNumber}-visual`,
@@ -91,5 +116,11 @@ export function shouldUseVisualPageTranslation(segments: readonly VisualTranslat
   const numericCells = texts.filter((text) => /^\d+(?:\.\d+)?(?:\s*[%±]\s*\d+(?:\.\d+)?)?$/.test(text));
   const hasTableHeader = texts.some((text) => /\bMethod\b/i.test(text) && /\b(?:Score|Result|Task|Average|Accuracy|Success)\b/i.test(text));
   const numberedResultTable = hasNumberedTable && (ratioCells.length >= 3 || numericCells.length >= 4 || hasTableHeader);
-  return numberedResultTable || hasRepeatedColumnGrid(segments);
+  // Text-layer geometry is fast, but it cannot reliably infer semantic blocks
+  // on multi-column pages. Route those pages through the existing page-image
+  // GPT path so each paragraph receives an independent visual block.
+  return numberedResultTable
+    || hasRepeatedColumnGrid(segments)
+    || hasTwoColumnLayout(segments)
+    || hasSuspiciousGeometry(segments);
 }

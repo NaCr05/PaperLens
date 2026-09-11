@@ -1,5 +1,7 @@
-export type TranslationSource = { id: string };
-export type ParsedTranslationSegment = { id: string; translation: string; formulaExplanation: string };
+import { parseVisualBlocks, type VisualBlock } from "./visual-alignment.ts";
+
+export type TranslationSource = { id: string; requireVisualBlocks?: boolean };
+export type ParsedTranslationSegment = { id: string; translation: string; formulaExplanation: string; visualBlocks?: VisualBlock[] };
 
 export const MAX_TRANSLATION_REPAIR_ATTEMPTS = 2;
 
@@ -43,9 +45,16 @@ function repairJsonEscapes(answer: string) {
 }
 
 export function parseTranslationResponse(answer: string, source: readonly TranslationSource[]) {
-  const parsed = JSON.parse(repairJsonEscapes(answer)) as {
-    segments?: { id?: string; translation?: string; formulaExplanation?: string }[];
-  } | { id?: string; translation?: string; formulaExplanation?: string }[];
+  const cleaned = answer.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
+  let value: unknown;
+  try {
+    value = JSON.parse(cleaned);
+  } catch {
+    value = JSON.parse(repairJsonEscapes(answer));
+  }
+  const parsed = value as {
+    segments?: { id?: string; translation?: string; formulaExplanation?: string; visualBlocks?: unknown }[];
+  } | { id?: string; translation?: string; formulaExplanation?: string; visualBlocks?: unknown }[];
   const values = Array.isArray(parsed) ? parsed : parsed.segments;
   if (!Array.isArray(values)) throw new Error("AI 没有返回可同步的段落结构");
 
@@ -61,10 +70,18 @@ export function parseTranslationResponse(answer: string, source: readonly Transl
     const id = typeof item?.id === "string" ? item.id : "";
     const translation = typeof item?.translation === "string" ? item.translation.trim() : "";
     if (!sourceIds.has(id) || counts.get(id) !== 1 || !translation) continue;
+    const visualBlocks = /-visual$/.test(id) ? parseVisualBlocks(item.visualBlocks) : undefined;
+    if (source.find(segment => segment.id === id)?.requireVisualBlocks && !visualBlocks) {
+      throw new Error("视觉翻译缺少 visualBlocks，必须返回每个区块的原文、译文和归一化坐标");
+    }
+    if (visualBlocks && visualBlocks.map(block => block.translation).join("").replace(/\s/g, "") !== translation.replace(/\s/g, "")) {
+      throw new Error("视觉区块与完整译文内容不一致，请保持完整覆盖且不重复");
+    }
     valid.set(id, {
       id,
       translation,
       formulaExplanation: typeof item?.formulaExplanation === "string" ? item.formulaExplanation.trim() : "",
+      ...(visualBlocks ? { visualBlocks } : {}),
     });
   }
 

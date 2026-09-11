@@ -49,6 +49,12 @@ test("retains the existing LaTeX JSON escape repair", () => {
   assert.equal(parsed.translated[0].translation, "\\(x_1\\)");
 });
 
+test("does not repair already valid JSON newlines before Latin text or equations", () => {
+  const translation = "标题\nProf. Name\n\\[\ni\\hbar=x\n\\]";
+  const answer = JSON.stringify({ segments: [{ id: "p1-visual", translation, formulaExplanation: "" }] });
+  assert.equal(parseTranslationResponse(answer, [{ id: "p1-visual" }]).translated[0].translation, translation);
+});
+
 test("automatically requests only missing ids and restores the full mapping", async () => {
   const calls = [];
   const repairs = [];
