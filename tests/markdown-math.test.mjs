@@ -10,8 +10,7 @@ import { normalizeLatexDelimiters, recoverTranslationNewlines } from "../app/mar
 function render(text) {
   return renderToStaticMarkup(createElement(ReactMarkdown, {
     remarkPlugins: [remarkMath], rehypePlugins: [rehypeKatex],
-    children: normalizeLatexDelimiters(text),
-  }));
+  }, normalizeLatexDelimiters(text)));
 }
 function annotations(html) {
   return [...html.matchAll(/<annotation encoding="application\/x-tex">([\s\S]*?)<\/annotation>/g)].map(match => match[1]);
