@@ -8,7 +8,7 @@ PaperLens is built for papers, lecture notes, and other PDF learning materials. 
 
 ## Demo video
 
-[![Demo video](./public/paperlens-demo-poster.png)](https://raw.githubusercontent.com/Peter-cuhk/PaperLens/main/public/paperlens-demo.mp4)
+[![Demo video](./public/paperlens-demo-poster-play.png)](https://raw.githubusercontent.com/Peter-cuhk/PaperLens/main/public/paperlens-demo.mp4)
 
 [Download and play the demo video](https://raw.githubusercontent.com/Peter-cuhk/PaperLens/main/public/paperlens-demo.mp4)
 ## Core features

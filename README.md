@@ -8,7 +8,7 @@ PaperLens 面向论文、课程讲义和其他 PDF 学习资料。文件在本�
 
 ## 演示视频
 
-[![演示视频](./public/paperlens-demo-poster.png)](https://raw.githubusercontent.com/Peter-cuhk/PaperLens/main/public/paperlens-demo.mp4)
+[![演示视频](./public/paperlens-demo-poster-play.png)](https://raw.githubusercontent.com/Peter-cuhk/PaperLens/main/public/paperlens-demo.mp4)
 
 [下载并播放演示视频](https://raw.githubusercontent.com/Peter-cuhk/PaperLens/main/public/paperlens-demo.mp4)
 ## 核心功能
