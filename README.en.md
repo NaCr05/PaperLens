@@ -8,6 +8,8 @@ PaperLens is built for papers, lecture notes, and other PDF learning materials. 
 
 ## Demo video
 
+<video src="https://github.com/user-attachments/assets/58a690bb-1713-4989-953f-b0f5932e93bd" controls muted playsinline width="100%"></video>
+
 [![Demo video](./public/paperlens-demo-poster-play.png)](https://github.com/user-attachments/assets/58a690bb-1713-4989-953f-b0f5932e93bd)
 
 [Download and play the demo video](https://github.com/user-attachments/assets/58a690bb-1713-4989-953f-b0f5932e93bd)
