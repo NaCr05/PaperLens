@@ -1,10 +1,14 @@
-# PageX Local
+# PaperLens Local
 
 [中文版](./README.md) · [TODO](./TODO.md) · [Apache-2.0 License](./LICENSE)
 
 > A local-first PDF reader that imports common document formats, keeps original and translated paragraphs synchronized, and connects directly to your local Codex for accurate full-document translation.
 
-PageX is built for papers, lecture notes, and other PDF learning materials. Files are read locally, source and translation paragraphs stay aligned, and translation requests go directly to the installed Codex CLI.
+PaperLens is built for papers, lecture notes, and other PDF learning materials. Files are read locally, source and translation paragraphs stay aligned, and translation requests go directly to the installed Codex CLI.
+
+## Demo video
+
+<video src="./public/paperlens-demo.mp4" controls muted playsinline width="100%"></video>
 
 ## Core features
 
@@ -32,7 +36,7 @@ PageX is built for papers, lecture notes, and other PDF learning materials. File
 ```mermaid
 flowchart LR
   INPUT["PDF / DOC / DOCX / PPT / PPTX"] --> CONVERT["Local conversion for Office files"]
-  CONVERT --> READER["PageX PDF reader"]
+  CONVERT --> READER["PaperLens PDF reader"]
   READER --> SYNC["Synchronized source and translation"]
   READER --> BRIDGE["127.0.0.1:43123 local bridge"]
   BRIDGE --> CODEX["Logged-in local Codex"]
@@ -66,7 +70,7 @@ Open <http://localhost:3000>.
 
 | Service | Address | Purpose |
 | --- | --- | --- |
-| PageX Web | `http://localhost:3000` | PDF reader interface |
+| PaperLens Web | `http://localhost:3000` | PDF reader interface |
 | AI bridge | `http://127.0.0.1:43123` | Local Codex translation calls |
 | iPad USB gateway | Detects `169.254.*.*` automatically | Optional direct access |
 
@@ -98,4 +102,4 @@ npm run bridge
 
 The current default is local Codex. The planned ChatGPT route is tracked in [TODO](./TODO.md); this README does not expand the experimental web-answer path.
 
-A few internal `PaperLens` identifiers remain for now; the complete rename to PageX is tracked in [TODO](./TODO.md).
+The project name is consistently `PaperLens`; related follow-up items are tracked in [TODO](./TODO.md).

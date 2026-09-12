@@ -1,10 +1,14 @@
-# PageX Local
+# PaperLens Local
 
 [English](./README.en.md) · [TODO](./TODO.md) · [Apache-2.0 License](./LICENSE)
 
 > 一个本地优先的 PDF 阅读器：导入资料、同步原文与译文，并直接连接本机 Codex 完成更准确的全文翻译。
 
-PageX 面向论文、课程讲义和其他 PDF 学习资料。文件在本机读取，原文与译文保持段落对应，翻译请求直接交给本机 Codex。
+PaperLens 面向论文、课程讲义和其他 PDF 学习资料。文件在本机读取，原文与译文保持段落对应，翻译请求直接交给本机 Codex。
+
+## 演示视频
+
+<video src="./public/paperlens-demo.mp4" controls muted playsinline width="100%"></video>
 
 ## 核心功能
 
@@ -32,7 +36,7 @@ PageX 面向论文、课程讲义和其他 PDF 学习资料。文件在本机读
 ```mermaid
 flowchart LR
   INPUT["PDF / DOC / DOCX / PPT / PPTX"] --> CONVERT["本机转换（Office 文件）"]
-  CONVERT --> READER["PageX PDF 阅读器"]
+  CONVERT --> READER["PaperLens PDF 阅读器"]
   READER --> SYNC["原文与译文段落同步"]
   READER --> BRIDGE["127.0.0.1:43123 本机 bridge"]
   BRIDGE --> CODEX["已登录的本机 Codex"]
@@ -66,7 +70,7 @@ npm run dev
 
 | 服务 | 地址 | 用途 |
 | --- | --- | --- |
-| PageX Web | `http://localhost:3000` | PDF 阅读器界面 |
+| PaperLens Web | `http://localhost:3000` | PDF 阅读器界面 |
 | AI bridge | `http://127.0.0.1:43123` | 本机 Codex 翻译调用 |
 | iPad USB gateway | 自动检测 `169.254.*.*` | 可选的直连访问 |
 
@@ -98,4 +102,4 @@ npm run bridge
 
 当前默认使用本机 Codex；未来改用 ChatGPT 的计划记录在 [TODO](./TODO.md)，本 README 不展开实验性网页回答通道。
 
-项目内部仍有少量历史 `PaperLens` 标识；完整改名为 PageX 记录在 [TODO](./TODO.md) 中。
+项目名称统一为 `PaperLens`；相关后续事项记录在 [TODO](./TODO.md) 中。
