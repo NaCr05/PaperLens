@@ -108,7 +108,5 @@ The project name is consistently `PaperLens`; related follow-up items are tracke
 
 ## TODO
 
-- [ ] Route the default AI path through ChatGPT instead of local Codex; decide whether local Codex remains an optional provider.
-- [ ] Audit remaining historical identifiers and update any documentation or desktop scripts that still use an older project name.
-- [ ] Prepare a release branch and tag after the public interface is frozen.
-- [ ] Add a small sample PDF and a short demo recording guide for first-time users.
+- [ ] Route the AI path through the ChatGPT web app in the future.
+- [ ] Launch the official website and later offer usage-based API billing.
