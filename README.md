@@ -108,7 +108,7 @@ npm run bridge
 
 ## 待办事项
 
-- [ ] Route the default AI path through ChatGPT instead of local Codex; decide whether local Codex remains an optional provider.
-- [ ] Audit remaining historical identifiers and update any documentation or desktop scripts that still use an older project name.
-- [ ] Prepare a release branch and tag after the public interface is frozen.
-- [ ] Add a small sample PDF and a short demo recording guide for first-time users.
+- [ ] 将默认 AI 路径接入 ChatGPT，并决定是否保留本机 Codex 作为可选提供方。
+- [ ] 检查代码、文档和桌面脚本中是否还存在旧项目名称。
+- [ ] 公共接口冻结后准备发布分支和版本标签。
+- [ ] 添加小型示例 PDF，并为首次使用者补充简短演示录制指南。
