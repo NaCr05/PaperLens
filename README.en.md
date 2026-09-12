@@ -4,8 +4,6 @@
 
 > A local-first PDF reader that imports common document formats, keeps original and translated paragraphs synchronized, and connects directly to your local Codex for accurate full-document translation.
 
-![PageX PDF reading workspace](./public/og.png)
-
 PageX is built for papers, lecture notes, and other PDF learning materials. Files are read locally, source and translation paragraphs stay aligned, and translation requests go directly to the installed Codex CLI.
 
 ## Core features
@@ -14,6 +12,20 @@ PageX is built for papers, lecture notes, and other PDF learning materials. File
 - **Bidirectional paragraph sync:** Hover, focus, or click a paragraph on either side to locate the corresponding paragraph on the other side.
 - **Full-document translation:** Translate the document from the current page, save progress page by page, and continue unfinished pages later.
 - **Local Codex:** Use the logged-in local Codex CLI by default, with the available model and optional `paper-reader` Skill for more accurate translation and less setup.
+
+## Usage flow
+
+1. Import documents in “我的空间”, organize them into folders, and resume from recent reading.
+
+   <img src="./public/readme-step-1-space.png" alt="Step 1: import and organize" width="100%">
+
+2. Open a document, read the original on the left, view the synchronized translation on the right, and ask questions in AI Chat at the bottom.
+
+   <img src="./public/readme-step-2-reader.png" alt="Step 2: read, translate, and ask" width="100%">
+
+3. Adjust zoom as you read; formulas and paragraphs stay aligned between the original and translation.
+
+   <img src="./public/readme-step-3-sync.png" alt="Step 3: synchronized reading" width="100%">
 
 ## How it works
 
@@ -85,22 +97,5 @@ npm run bridge
 4. Hover, focus, or click a paragraph on either side to synchronize the corresponding paragraph.
 
 The current default is local Codex. The planned ChatGPT route is tracked in [TODO](./TODO.md); this README does not expand the experimental web-answer path.
-
-## Security boundary
-
-- The AI bridge listens only on `127.0.0.1`.
-- PDFs are read locally in the browser, and temporary Office-conversion files are cleaned up afterward.
-- API keys are read only from server-side `.env` variables.
-- Local Codex calls use a read-only sandbox.
-
-## Development and verification
-
-```bash
-npm run lint
-npm run typecheck
-npm test
-```
-
-`npm test` runs a production build first and then the Node test suite.
 
 A few internal `PaperLens` identifiers remain for now; the complete rename to PageX is tracked in [TODO](./TODO.md).

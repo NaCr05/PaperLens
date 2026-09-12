@@ -4,8 +4,6 @@
 
 > 一个本地优先的 PDF 阅读器：导入资料、同步原文与译文，并直接连接本机 Codex 完成更准确的全文翻译。
 
-![PageX PDF reading workspace](./public/og.png)
-
 PageX 面向论文、课程讲义和其他 PDF 学习资料。文件在本机读取，原文与译文保持段落对应，翻译请求直接交给本机 Codex。
 
 ## 核心功能
@@ -14,6 +12,20 @@ PageX 面向论文、课程讲义和其他 PDF 学习资料。文件在本机读
 - **段落双向同步**：悬停、聚焦或点击原文/译文段落，都可以定位另一侧的对应内容。
 - **全文翻译**：一键从当前页开始翻译全文，逐页保存进度，之后可以继续未完成的页面。
 - **本机 Codex**：默认直接调用已登录的本机 Codex，翻译使用可用模型和 `paper-reader` Skill，减少额外配置并提升翻译准确度。
+
+## 使用流程
+
+1. 在“我的空间”导入资料，按文件夹整理，并从最近阅读继续。
+
+   <img src="./public/readme-step-1-space.png" alt="步骤 1：导入与整理" width="100%">
+
+2. 打开资料，左侧阅读原文，右侧查看同步译文，在底部 AI Chat 直接提问。
+
+   <img src="./public/readme-step-2-reader.png" alt="步骤 2：阅读、翻译与提问" width="100%">
+
+3. 调整缩放继续阅读，公式和段落在原文与译文之间保持对应。
+
+   <img src="./public/readme-step-3-sync.png" alt="步骤 3：同步阅读" width="100%">
 
 ## 工作方式
 
@@ -85,22 +97,5 @@ npm run bridge
 4. 悬停、聚焦或点击任一侧段落，另一侧会同步定位对应段落。
 
 当前默认使用本机 Codex；未来改用 ChatGPT 的计划记录在 [TODO](./TODO.md)，本 README 不展开实验性网页回答通道。
-
-## 安全边界
-
-- AI bridge 只监听 `127.0.0.1`。
-- PDF 在浏览器本地读取，Office 转换目录在完成后清理。
-- API 密钥只从服务端 `.env` 读取，不写入浏览器存储。
-- 本机 Codex 调用使用只读 sandbox。
-
-## 开发与验证
-
-```bash
-npm run lint
-npm run typecheck
-npm test
-```
-
-`npm test` 会先执行生产构建，再运行 Node 测试。
 
 项目内部仍有少量历史 `PaperLens` 标识；完整改名为 PageX 记录在 [TODO](./TODO.md) 中。
