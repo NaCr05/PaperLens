@@ -8,10 +8,9 @@ PaperLens is built for papers, lecture notes, and other PDF learning materials. 
 
 ## Demo video
 
-<video src="https://raw.githubusercontent.com/Peter-cuhk/PaperLens/main/public/paperlens-demo.mp4" controls muted playsinline width="100%">
-  <a href="https://raw.githubusercontent.com/Peter-cuhk/PaperLens/main/public/paperlens-demo.mp4">Download the demo video</a>
-</video>
+[![Demo video](./public/paperlens-demo-poster.png)](https://raw.githubusercontent.com/Peter-cuhk/PaperLens/main/public/paperlens-demo.mp4)
 
+[Download and play the demo video](https://raw.githubusercontent.com/Peter-cuhk/PaperLens/main/public/paperlens-demo.mp4)
 ## Core features
 
 - **Common-format import:** Import PDF, DOC, DOCX, PPT, and PPTX files. Office files are converted to PDF locally through LibreOffice.
