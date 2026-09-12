@@ -9,10 +9,6 @@ PaperLens 面向论文、课程讲义和其他 PDF 学习资料。文件在本�
 ## 演示视频
 
 <video src="https://github.com/user-attachments/assets/58a690bb-1713-4989-953f-b0f5932e93bd" controls muted playsinline width="100%"></video>
-
-[![演示视频](./public/paperlens-demo-poster-play.png)](https://github.com/user-attachments/assets/58a690bb-1713-4989-953f-b0f5932e93bd)
-
-[下载并播放演示视频](https://github.com/user-attachments/assets/58a690bb-1713-4989-953f-b0f5932e93bd)
 ## 核心功能
 
 - **多格式导入**：支持 PDF、DOC、DOCX、PPT 和 PPTX；Office 文件通过本机 LibreOffice 临时转换为 PDF。
