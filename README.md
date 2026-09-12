@@ -8,7 +8,9 @@ PaperLens 面向论文、课程讲义和其他 PDF 学习资料。文件在本�
 
 ## 演示视频
 
-<video src="./public/paperlens-demo.mp4" controls muted playsinline width="100%"></video>
+<video src="https://raw.githubusercontent.com/Peter-cuhk/PaperLens/main/public/paperlens-demo.mp4" controls muted playsinline width="100%">
+  <a href="https://raw.githubusercontent.com/Peter-cuhk/PaperLens/main/public/paperlens-demo.mp4">下载演示视频</a>
+</video>
 
 ## 核心功能
 
@@ -103,3 +105,10 @@ npm run bridge
 当前默认使用本机 Codex；未来改用 ChatGPT 的计划记录在 [TODO](./TODO.md)，本 README 不展开实验性网页回答通道。
 
 项目名称统一为 `PaperLens`；相关后续事项记录在 [TODO](./TODO.md) 中。
+
+## 待办事项
+
+- [ ] Route the default AI path through ChatGPT instead of local Codex; decide whether local Codex remains an optional provider.
+- [ ] Audit remaining historical identifiers and update any documentation or desktop scripts that still use an older project name.
+- [ ] Prepare a release branch and tag after the public interface is frozen.
+- [ ] Add a small sample PDF and a short demo recording guide for first-time users.

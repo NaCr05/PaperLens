@@ -8,7 +8,9 @@ PaperLens is built for papers, lecture notes, and other PDF learning materials. 
 
 ## Demo video
 
-<video src="./public/paperlens-demo.mp4" controls muted playsinline width="100%"></video>
+<video src="https://raw.githubusercontent.com/Peter-cuhk/PaperLens/main/public/paperlens-demo.mp4" controls muted playsinline width="100%">
+  <a href="https://raw.githubusercontent.com/Peter-cuhk/PaperLens/main/public/paperlens-demo.mp4">Download the demo video</a>
+</video>
 
 ## Core features
 
@@ -103,3 +105,10 @@ npm run bridge
 The current default is local Codex. The planned ChatGPT route is tracked in [TODO](./TODO.md); this README does not expand the experimental web-answer path.
 
 The project name is consistently `PaperLens`; related follow-up items are tracked in [TODO](./TODO.md).
+
+## TODO
+
+- [ ] Route the default AI path through ChatGPT instead of local Codex; decide whether local Codex remains an optional provider.
+- [ ] Audit remaining historical identifiers and update any documentation or desktop scripts that still use an older project name.
+- [ ] Prepare a release branch and tag after the public interface is frozen.
+- [ ] Add a small sample PDF and a short demo recording guide for first-time users.
