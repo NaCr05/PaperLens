@@ -46,10 +46,10 @@ PDF 由浏览器本地读取；Office 文件只在本机转换。AI bridge 仅�
 
 ## 环境要求
 
-- macOS（当前开发和验证环境）
+- macOS；Windows 11 64 位已支持开发启动与构建，功能范围见下方 Windows 说明
 - Node.js `>= 22.13.0`
 - npm
-- 已安装并登录的 [Codex CLI](https://developers.openai.com/codex/cli/)
+- 使用本机 AI 功能时，需要安装并登录 [Codex CLI](https://developers.openai.com/codex/cli/)
 - 需要导入 DOC/DOCX/PPT/PPTX 时，再安装 LibreOffice
 - 可选：全局安装 `paper-reader` Skill
 
@@ -73,7 +73,40 @@ npm run dev
 | AI bridge | `http://127.0.0.1:43123` | 本机 Codex 翻译调用 |
 | iPad USB gateway | 自动检测 `169.254.*.*` | 可选的直连访问 |
 
-### 首次启动检查
+### Windows（PowerShell）
+
+安装 Node.js `>= 22.13.0` 和 Git 后，在 PowerShell 中运行：
+
+```powershell
+git clone https://github.com/Peter-cuhk/PaperLens.git
+cd PaperLens
+npm ci
+if (-not (Test-Path .env)) { Copy-Item .env.example .env }
+npm run dev
+```
+
+打开 <http://localhost:3000>，在另一个 PowerShell 窗口检查 bridge：
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:43123/health
+```
+
+`ok: true` 和 `service: "PaperLens AI bridge"` 表示 bridge 已启动。当前 Windows 适配覆盖开发启动、构建和 Web 启动；Codex 自动发现与调用、Office 转换以及 iPad USB 连接仍待单独适配和验证。因此 `providers.local-codex.available: false` 或 `USB: waiting…` 不代表网页启动失败，启动检查也不需要登录 AI 账户。
+
+在运行服务的窗口按 `Ctrl+C` 停止本次启动的服务。开发参数通过 `--` 转发，例如 `npm run dev -- --port 3001`。项目目录可以包含空格或中文。
+
+构建并查看生产 Web 页面：
+
+```powershell
+npm run build
+npm run start -- --hostname localhost
+```
+
+`start` 只启动构建后的 Web 服务，不会启动 AI bridge 或 USB gateway。日常本机阅读开发流程使用 `npm run dev`。
+
+如果 PowerShell 提示无法加载 `npm.ps1`，可在上述命令中把 `npm` 换成 `npm.cmd`，无需修改系统执行策略。
+
+### macOS 首次启动检查
 
 ```bash
 node --version       # >= 22.13.0
@@ -91,6 +124,20 @@ curl http://127.0.0.1:43123/health
 ```bash
 npm run bridge
 ```
+
+### 启动兼容性检查
+
+```bash
+npm run test:startup
+npm run build
+npm run test:startup-smoke
+npm run typecheck
+npm run lint
+```
+
+`test:startup` 使用独立模拟服务验证参数、中文／空格路径、失败处理和进程清理；`test:startup-smoke` 需要先构建，会启动真实开发／生产 Web 服务、检查页面和 bridge，再停止服务。两者均不会发起 AI 推理或文档转换。
+
+GitHub Actions 在 Windows 和 macOS、Node.js 22 和 24 上执行上述检查，并将仓库放在带空格和中文的目录中。完整测试命令仍为 `npm test`；其中现有 Codex 模拟 CLI 测试使用 Unix shebang，页面源码测试还依赖个人目录的 `paper-reader/SKILL.md`，干净 Windows 环境仍可能因这两项前置条件失败。这些问题不属于本轮启动适配的通过项。
 
 ## 使用方式
 

@@ -46,10 +46,10 @@ PDFs are read in the browser. Office files are converted locally. The AI bridge 
 
 ## Requirements
 
-- macOS (the current development and verification environment)
+- macOS; Windows 11 x64 supports development startup and builds within the scope described below
 - Node.js `>= 22.13.0`
 - npm
-- A logged-in [Codex CLI](https://developers.openai.com/codex/cli/)
+- A logged-in [Codex CLI](https://developers.openai.com/codex/cli/) for local AI features
 - LibreOffice only if you need DOC/DOCX/PPT/PPTX import
 - Optional: the global `paper-reader` Skill
 
@@ -73,7 +73,40 @@ Open <http://localhost:3000>.
 | AI bridge | `http://127.0.0.1:43123` | Local Codex translation calls |
 | iPad USB gateway | Detects `169.254.*.*` automatically | Optional direct access |
 
-### First-run check
+### Windows (PowerShell)
+
+Install Node.js `>= 22.13.0` and Git, then run in PowerShell:
+
+```powershell
+git clone https://github.com/Peter-cuhk/PaperLens.git
+cd PaperLens
+npm ci
+if (-not (Test-Path .env)) { Copy-Item .env.example .env }
+npm run dev
+```
+
+Open <http://localhost:3000> and check the bridge from a second PowerShell window:
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:43123/health
+```
+
+`ok: true` and `service: "PaperLens AI bridge"` confirm that the bridge is running. Windows support currently covers development startup, builds, and Web startup. Codex discovery/invocation, Office conversion, and iPad USB access still need separate adaptation and validation. Thus `providers.local-codex.available: false` or `USB: waiting…` does not indicate a Web startup failure. Startup checks do not require an AI login.
+
+Press `Ctrl+C` in the service terminal to stop the services started by that command. Forward development options after `--`, for example `npm run dev -- --port 3001`. Project paths may contain spaces or Chinese characters.
+
+Build and preview the production Web app:
+
+```powershell
+npm run build
+npm run start -- --hostname localhost
+```
+
+`start` runs only the built Web service, without the AI bridge or USB gateway. Use `npm run dev` for the local reading development workflow.
+
+If PowerShell refuses to load `npm.ps1`, use `npm.cmd` in place of `npm` in these commands; no execution-policy change is needed.
+
+### macOS first-run check
 
 ```bash
 node --version       # >= 22.13.0
@@ -91,6 +124,20 @@ To start only the bridge:
 ```bash
 npm run bridge
 ```
+
+### Startup compatibility checks
+
+```bash
+npm run test:startup
+npm run build
+npm run test:startup-smoke
+npm run typecheck
+npm run lint
+```
+
+`test:startup` uses isolated fixture services to check arguments, paths with spaces/Chinese characters, failures, and process cleanup. After a build, `test:startup-smoke` starts the actual development/production Web services, checks the reader and bridge, then stops them. Neither command requests AI inference or document conversion.
+
+GitHub Actions runs these checks on Windows and macOS with Node.js 22 and 24, checking out the project into a path containing spaces and Chinese characters. The full suite remains `npm test`; its existing mock Codex CLI uses a Unix shebang, and a source-level reader test reads a personal `paper-reader/SKILL.md`. Those prerequisites can still fail on a clean Windows machine and are outside the passing startup checks in this change.
 
 ## Usage
 
