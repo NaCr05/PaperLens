@@ -5,6 +5,22 @@ import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 
+export async function signalProcessGroup(pid, signal, { platform = process.platform } = {}) {
+  const attempts = platform === "darwin" ? 11 : 1;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      process.kill(-pid, signal);
+      return;
+    } catch (error) {
+      if (error.code === "ESRCH") return;
+      if (error.code !== "EPERM" || attempt === attempts - 1) throw error;
+      // Darwin killpg can report EPERM while a group contains only zombies.
+      // Let the OS reap them; persistent permission failures still propagate.
+      await delay(10);
+    }
+  }
+}
+
 // The caller must spawn an independent process group on POSIX and pass a
 // promise registered for the child's close event immediately after spawning.
 export async function stopProcessTree({ child, closed, graceMs = 2000 }) {
@@ -23,18 +39,14 @@ export async function stopProcessTree({ child, closed, graceMs = 2000 }) {
       }
     }
   } else {
-    const signalGroup = (signal) => {
-      try { process.kill(-child.pid, signal); }
-      catch (error) { if (error.code !== "ESRCH") throw error; }
-    };
-    signalGroup("SIGTERM");
+    await signalProcessGroup(child.pid, "SIGTERM");
     const timeout = new AbortController();
     try {
       await Promise.race([closed, delay(graceMs, undefined, { signal: timeout.signal })]);
     } finally {
       timeout.abort();
     }
-    signalGroup("SIGKILL");
+    await signalProcessGroup(child.pid, "SIGKILL");
   }
 
   await closed;
