@@ -1,12 +1,20 @@
 import { spawn } from "node:child_process";
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, join, parse } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const recordPath = process.env.PAPERLENS_SOFFICE_FIXTURE_RECORD;
+
+async function publishRecord(path, contents) {
+  // Readers use these files as readiness signals; never expose a partial record.
+  const pending = `${path}.${process.pid}.tmp`;
+  await writeFile(pending, contents);
+  await rename(pending, path);
+}
+
 if (process.argv[2] === "descendant") {
   process.on("SIGTERM", () => {});
-  await writeFile(`${recordPath}.child`, String(process.pid));
+  await publishRecord(`${recordPath}.child`, String(process.pid));
   setInterval(() => {}, 1000);
 } else {
   const args = process.argv.slice(2);
@@ -25,7 +33,7 @@ if (process.argv[2] === "descendant") {
     record.descendant = descendant.pid;
     setInterval(() => {}, 1000);
   }
-  await writeFile(recordPath, JSON.stringify(record));
+  await publishRecord(recordPath, JSON.stringify(record));
   if (mode === "success") await writeFile(output, "%PDF-1.7\nOffice fixture\n%%EOF\n");
   if (mode === "empty") await writeFile(output, "");
   if (mode === "invalid") await writeFile(output, "not a PDF");

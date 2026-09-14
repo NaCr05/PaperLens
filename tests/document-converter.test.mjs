@@ -104,6 +104,7 @@ for (const variable of ["ProgramW6432", "ProgramFiles", "ProgramFiles(x86)"]) {
 }
 
 function isRunning(pid) {
+  assert.ok(Number.isSafeInteger(pid) && pid > 0, "expected a positive fixture process ID");
   try { process.kill(pid, 0); return true; }
   catch (error) { if (error.code === "ESRCH") return false; throw error; }
 }
@@ -134,12 +135,16 @@ async function conversionFixture(t, { mode = "success", timeoutMs = 10_000, ...o
     while (true) {
       try {
         const pid = Number(await readFile(`${recordPath}.child`, "utf8"));
-        t.after(() => { if (isRunning(pid)) process.kill(pid, "SIGKILL"); });
-        return pid;
+        const parent = await record();
+        if (Number.isSafeInteger(pid) && pid > 0 && parent.descendant === pid) {
+          t.after(() => { if (isRunning(pid)) process.kill(pid, "SIGKILL"); });
+          return pid;
+        }
       } catch (error) {
-        if (error.code !== "ENOENT" || Date.now() > deadline) throw error;
-        await delay(20);
+        if (error.code !== "ENOENT") throw error;
       }
+      assert.ok(Date.now() < deadline, "timed out waiting for a complete fixture process record");
+      await delay(20);
     }
   }
   return { converter, temporaryDirectory, launches, record, waitForDescendant };

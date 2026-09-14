@@ -22,6 +22,7 @@ async function exists(path) {
 }
 
 function isRunning(pid) {
+  assert.ok(Number.isSafeInteger(pid) && pid > 0, "expected a positive fixture process ID");
   try { process.kill(pid, 0); return true; }
   catch (error) { if (error.code === "ESRCH") return false; throw error; }
 }
@@ -71,8 +72,12 @@ test("bridge reports Office availability, rejects concurrent conversions, and cl
     await rm(`${recordPath}.child`, { force: true });
     const controller = new AbortController();
     const pending = convert("hang", controller.signal).catch((error) => error);
-    await waitFor(() => exists(`${recordPath}.child`));
+    await waitFor(async () => (await exists(`${recordPath}.child`)) && (await exists(recordPath)));
     const record = JSON.parse(await readFile(recordPath, "utf8"));
+    const descendant = Number(await readFile(`${recordPath}.child`, "utf8"));
+    assert.ok(isRunning(record.pid));
+    assert.ok(isRunning(descendant));
+    assert.equal(record.descendant, descendant);
     owned.add(record.pid);
     owned.add(record.descendant);
     assert.ok(await exists(record.directory));
