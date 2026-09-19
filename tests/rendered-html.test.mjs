@@ -289,7 +289,7 @@ test("keeps local learning-material reading, direct Codex calls, scrolling, zoom
   assert.match(converter, /--convert-to/);
   assert.match(converter, /paperlens-convert-/);
   assert.match(converter, /UserInstallation/);
-  assert.match(converter, /await rm\(directory, \{ recursive: true, force: true \}\)/);
+  // Temporary-file cleanup is exercised by document-converter.test.mjs.
   assert.match(devScript, /\["--hostname", "localhost"\]/);
   assert.match(devScript, /scripts\/usb-gateway\.mjs/);
   assert.match(devScript, /fileURLToPath/);

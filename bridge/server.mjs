@@ -538,6 +538,11 @@ server = createServer(async (request, response) => {
   }
   if (request.method === "POST" && request.url === "/convert-document") {
     let acquiredConverter = false;
+    const controller = new AbortController();
+    const onAborted = () => controller.abort();
+    const onClosed = () => { if (!response.writableEnded) controller.abort(); };
+    request.once("aborted", onAborted);
+    response.once("close", onClosed);
     try {
       if (documentConversionActive) {
         throw new DocumentConversionError("正在转换上一个文档，请稍候再试", { code: "converter_busy", status: 429 });
@@ -546,13 +551,18 @@ server = createServer(async (request, response) => {
       acquiredConverter = true;
       const fileName = decodeFileName(request.headers["x-paperlens-file-name"]);
       const bytes = await readBytes(request);
-      const result = await documentConverter.convert(bytes, fileName);
+      if (request.aborted || response.destroyed) controller.abort();
+      const result = await documentConverter.convert(bytes, fileName, {
+        signal: AbortSignal.any([controller.signal, shutdown.signal]),
+      });
       sendPdf(response, result, origin);
     } catch (error) {
       const status = error instanceof DocumentConversionError ? error.status : 500;
       const code = error instanceof DocumentConversionError ? error.code : "conversion_failed";
       sendJson(response, status, { error: error instanceof Error ? error.message : "文档转换失败", code }, origin);
     } finally {
+      request.removeListener("aborted", onAborted);
+      response.removeListener("close", onClosed);
       if (acquiredConverter) documentConversionActive = false;
     }
     return;

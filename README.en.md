@@ -91,7 +91,7 @@ Open <http://localhost:3000> and check the bridge from a second PowerShell windo
 Invoke-RestMethod http://127.0.0.1:43123/health
 ```
 
-`ok: true` and `service: "PaperLens AI bridge"` confirm that the bridge is running. Windows support covers development startup, builds, Web startup, and local Codex as described below. Office conversion and iPad USB access still need separate adaptation and validation. `providers.local-codex.available: false` or `USB: waiting…` does not indicate a Web startup failure. Startup checks do not require an AI login.
+`ok: true` and `service: "PaperLens AI bridge"` confirm that the bridge is running. Windows support covers development startup, builds, Web startup, and local Codex and Office conversion as described below. iPad USB access still needs separate adaptation and validation. `providers.local-codex.available: false` or `USB: waiting…` does not indicate a Web startup failure. Startup checks do not require an AI login.
 
 Press `Ctrl+C` in the service terminal to stop the services started by that command. Forward development options after `--`, for example `npm run dev -- --port 3001`. Project paths may contain spaces or Chinese characters.
 
@@ -135,6 +135,34 @@ The override also accepts a standard npm `codex.cmd` or Codex's JavaScript entry
 
 Translation, terms, and ordinary chat keep `--ignore-user-config`; repository verification keeps the existing search/config behavior. All modes retain `read-only` and `--ephemeral`. The `paper-reader` Skill is optional: a missing file does not prevent bridge startup or fixture tests. Cancellation and timeouts stop this CLI and its descendants, wait for exit, then remove temporary image files.
 
+### Word/PPT conversion on Windows
+
+Install the Windows version from the [LibreOffice website](https://www.libreoffice.org/download/), then restart PaperLens. PDF reading does not require LibreOffice. The bridge searches `PATH` first, followed by `LibreOffice\program` under `ProgramW6432`, `ProgramFiles`, and `ProgramFiles(x86)`. Within each directory it prefers `soffice.com`, then `soffice.exe`. The [LibreOffice command-line guide](https://help.libreoffice.org/latest/en-US/text/shared/guide/start_parameters.html) recommends `soffice.com` for Windows console tasks.
+
+For a custom installation, set the full path in the project's `.env` (spaces, Chinese characters, and backslashes are supported):
+
+```dotenv
+PAPERLENS_SOFFICE_PATH="D:\应用程序\LibreOffice\program\soffice.com"
+```
+
+Alternatively, set it for the current PowerShell session:
+
+```powershell
+$env:PAPERLENS_SOFFICE_PATH = 'C:\Program Files\LibreOffice\program\soffice.com'
+& $env:PAPERLENS_SOFFICE_PATH --version
+npm run dev
+```
+
+An explicit path takes priority. A missing or misspelled path does not silently fall back to another installation. Restart the bridge after changing its configuration, then check:
+
+```powershell
+(Invoke-RestMethod http://127.0.0.1:43123/health).documentConversion
+```
+
+`available: true` means the converter was found; `engine: "LibreOffice"` identifies the engine. Each conversion runs in the background with its own temporary directory and LibreOffice user profile. A timeout (120 seconds by default), disconnected request, or graceful bridge shutdown stops that conversion's process tree and waits for exit before removing temporary files. Existing LibreOffice windows use other profiles and are not stopped by executable name.
+
+The repository's DOCX/PPTX and legacy DOC/PPT samples were validated on Windows 11 x64, Node.js 24, and LibreOffice 26.8.0.3: English/Chinese text, tables, two-page documents/slides, and paths containing spaces and Chinese characters. Complex layouts, embedded objects, macros, and encrypted documents need validation with the actual material. Rendering also depends on LibreOffice and installed fonts.
+
 ### macOS first-run check
 
 ```bash
@@ -162,7 +190,9 @@ npm run typecheck
 npm run lint
 ```
 
-`npm test` builds and runs the full suite, including startup, Codex discovery, login state, arguments/images, errors, and process cleanup. Codex tests use an isolated JavaScript fixture CLI. They require neither a personal Skill nor a logged-in AI account and do not request AI inference. Real translation and chat require separate acceptance checks.
+`npm test` builds and runs the full suite, including Office fixture conversion, startup, Codex discovery, login state, arguments/images, errors, and process cleanup. Codex tests use an isolated JavaScript fixture CLI. They require neither a personal Skill nor a logged-in AI account and do not request AI inference. Real translation and chat require separate acceptance checks.
+
+`test:office` uses fixture processes to check discovery, failed output, timeouts/cancellation, temporary-file cleanup, and the bridge concurrency limit. It does not require LibreOffice. With LibreOffice installed, run `npm run test:office-smoke` to convert all four Office sample formats and check page counts and English/Chinese text using PDF.js. This command fails if LibreOffice is missing and is not part of default CI. See [tests/fixtures/office/README.md](tests/fixtures/office/README.md) for the samples.
 
 GitHub Actions runs these checks on Windows and macOS with Node.js 22 and 24, checking out the project into a path containing spaces and Chinese characters. You can still run `npm run test:startup` on its own. After a build, `npm run test:startup-smoke` starts the actual development/production Web services, checks the reader and bridge, then stops them.
 
